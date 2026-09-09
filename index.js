@@ -2,7 +2,15 @@ const crypto = require("crypto");
 const express = require("express");
 
 const app = express();
-app.use(express.json({ limit: "16kb" }));
+// On garde le corps brut pour vérifier la signature des webhooks GitHub
+app.use(
+  express.json({
+    limit: "1mb",
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.disable("x-powered-by");
 
 const PORT = 3000;
@@ -15,6 +23,8 @@ const DOKPLOY_URL = (process.env.DOKPLOY_URL || "").replace(/\/+$/, "");
 // Fallbacks facultatifs si on n'utilise pas l'API Dokploy
 const GITHUB_OWNER = process.env.GITHUB_OWNER || "";
 const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
+// Optionnel : secret d'un webhook GitHub "push" pour poser le statut "en cours"
+const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || "";
 let APP_MAP = {};
 try {
   APP_MAP = process.env.APP_MAP ? JSON.parse(process.env.APP_MAP) : {};
@@ -134,16 +144,25 @@ async function getHeadSha(owner, repo, branch) {
   return data.sha;
 }
 
-async function setGithubStatus(owner, repo, sha, state, description, url) {
+// url = URL publique de l'app (environment_url) ; logUrl = page de logs Dokploy ("Details")
+async function setGithubStatus(owner, repo, sha, state, description, url, logUrl) {
+  const details = logUrl || url;
+
   const deployment = await githubPost(
     `${GITHUB_API}/repos/${owner}/${repo}/deployments`,
-    { ref: sha, auto_merge: false, required_contexts: [] }
+    { ref: sha, auto_merge: false, required_contexts: [], environment: "dokploy" }
   );
   console.log(`[github] deployment créé : id=${deployment.id}`);
 
   await githubPost(
     `${GITHUB_API}/repos/${owner}/${repo}/deployments/${deployment.id}/statuses`,
-    { state, description, environment_url: url, auto_inactive: true }
+    {
+      state,
+      description,
+      environment_url: url,
+      log_url: details,
+      auto_inactive: true,
+    }
   );
   console.log(`[github] deployment status : state=${state}`);
 
@@ -152,9 +171,20 @@ async function setGithubStatus(owner, repo, sha, state, description, url) {
     state: commitState,
     description,
     context: "Dokploy",
-    target_url: url,
+    target_url: details,
   });
   console.log(`[github] commit status : state=${commitState}`);
+}
+
+// Pose uniquement un commit status (utilisé par le webhook GitHub "push" -> en cours)
+async function setPendingStatus(owner, repo, sha, targetUrl) {
+  await githubPost(`${GITHUB_API}/repos/${owner}/${repo}/statuses/${sha}`, {
+    state: "pending",
+    description: STATE_MAP.pending.description,
+    context: "Dokploy",
+    target_url: targetUrl,
+  });
+  console.log(`[github] commit status : state=pending (${owner}/${repo} ${sha.slice(0, 7)})`);
 }
 
 // ---------- Résolution du repo ----------
@@ -248,6 +278,7 @@ async function parsePayload(body = {}) {
       branch: body.branch || GITHUB_BRANCH,
       sha: body.sha,
       url: cleanUrl(body.appUrl),
+      logUrl: cleanUrl(body.logUrl),
     };
   }
 
@@ -268,6 +299,7 @@ async function parsePayload(body = {}) {
     branch: repo.branch,
     sha: undefined,
     url: firstDomain ? `https://${firstDomain}` : undefined,
+    logUrl: cleanUrl(body.buildLink),
   };
 }
 
@@ -317,7 +349,8 @@ app.post("/webhook", async (req, res) => {
       sha,
       mapped.state,
       mapped.description,
-      intent.url
+      intent.url,
+      intent.logUrl
     );
     console.log("[webhook] statuts GitHub mis à jour avec succès");
     return res.json({ ok: true, state: mapped.state });
@@ -331,7 +364,62 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+// Webhook GitHub "push" : pose le statut "en cours" dès le push (optionnel)
+app.post("/github", async (req, res) => {
+  if (!GITHUB_WEBHOOK_SECRET) return res.status(404).json({ error: "Non configuré" });
+
+  const sig = req.headers["x-hub-signature-256"] || "";
+  const expected =
+    "sha256=" +
+    crypto
+      .createHmac("sha256", GITHUB_WEBHOOK_SECRET)
+      .update(req.rawBody || Buffer.alloc(0))
+      .digest("hex");
+  if (!safeEqual(sig, expected)) {
+    console.warn("[github-push] signature invalide -> 401");
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const event = req.headers["x-github-event"];
+  if (event === "ping") return res.json({ ok: true, pong: true });
+  if (event !== "push") return res.json({ ok: true, ignored: event });
+
+  const body = req.body || {};
+  if (body.deleted || !body.after || /^0+$/.test(body.after)) {
+    return res.json({ ok: true, ignored: "branch supprimée" });
+  }
+  const owner = body.repository?.owner?.login || body.repository?.owner?.name;
+  const repo = body.repository?.name;
+  if (!NAME_RE.test(owner || "") || !NAME_RE.test(repo || "")) {
+    return res.status(400).json({ error: "repo invalide" });
+  }
+
+  console.log(`[github-push] ${owner}/${repo} ${body.after.slice(0, 7)} -> pending`);
+  try {
+    await setPendingStatus(owner, repo, body.after, body.compare);
+    return res.json({ ok: true, state: "pending" });
+  } catch (err) {
+    console.error("[github-push] erreur API GitHub :", err.message, JSON.stringify(err.detail || {}));
+    return res.status(500).json({ error: "Échec de la mise à jour GitHub" });
+  }
+});
+
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+app.get("/", (_req, res) => {
+  res
+    .type("html")
+    .send(
+      `<!doctype html><meta charset="utf-8"><title>dokploy-github-status</title>` +
+        `<style>body{font:14px system-ui;margin:3rem auto;max-width:34rem;padding:0 1rem;color:#222}` +
+        `code{background:#f2f2f2;padding:.1em .3em;border-radius:3px}</style>` +
+        `<h1>dokploy-github-status</h1>` +
+        `<p>Service actif. Il met à jour les statuts de déploiement GitHub à partir des webhooks Dokploy.</p>` +
+        `<ul><li><code>POST /webhook</code> — notification Dokploy</li>` +
+        `<li><code>POST /github</code> — webhook GitHub push (statut « en cours »)</li>` +
+        `<li><code>GET /health</code></li></ul>`
+    );
+});
 
 app.listen(PORT, () => {
   console.log(`dokploy-github-status en écoute sur le port ${PORT}`);

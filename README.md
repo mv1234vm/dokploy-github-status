@@ -53,7 +53,23 @@ Le service :
 2. récupère le dernier commit de la branche via l'API GitHub
 3. pose un deployment status + un commit status (`context: "Dokploy"`)
 
-Limite : pas de statut « en cours » (Dokploy ne notifie qu'à la fin du déploiement).
+Le lien **Details** sur GitHub pointe vers la page de logs du déploiement Dokploy.
+
+## Statut « en cours » (optionnel)
+
+Dokploy ne notifie qu'à la fin. Pour avoir la pastille jaune « Déploiement en cours »
+dès le `git push`, ajoute un webhook GitHub :
+
+1. Choisis un secret (`openssl rand -hex 16`) et mets-le dans `GITHUB_WEBHOOK_SECRET`
+   (Environment du service) → Redeploy.
+2. GitHub → repo (ou **organisation** pour tout couvrir d'un coup) → Settings →
+   **Webhooks** → Add webhook :
+   - Payload URL : `https://<ton-domaine>/github`
+   - Content type : `application/json`
+   - Secret : le même que `GITHUB_WEBHOOK_SECRET`
+   - Events : *Just the push event*
+
+Ensuite : push → jaune, puis Dokploy termine → vert/rouge.
 
 ## Format manuel (optionnel)
 

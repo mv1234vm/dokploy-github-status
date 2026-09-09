@@ -182,6 +182,13 @@ app.post("/webhook", async (req, res) => {
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
+// Route de diagnostic : log le payload brut envoyé par Dokploy (à retirer ensuite)
+app.post("/debug", (req, res) => {
+  console.log("[debug] headers :", JSON.stringify(req.headers));
+  console.log("[debug] body :", JSON.stringify(req.body, null, 2));
+  res.json({ ok: true });
+});
+
 app.listen(PORT, () => {
   console.log(`dokploy-github-status en écoute sur le port ${PORT}`);
 });

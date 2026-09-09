@@ -1,0 +1,12 @@
+{
+  "name": "dokploy-github-status",
+  "version": "1.0.0",
+  "description": "Serveur Express qui reçoit des webhooks Dokploy et met à jour les statuts de déploiement sur GitHub",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}

@@ -9,24 +9,29 @@ correspond au nom du repo GitHub.
 
 ## Variables d'environnement
 
-| Variable         | Requis | Description                                                                    |
-| ---------------- | ------ | ---------------------------------------------------------------------------- |
-| `GITHUB_TOKEN`   | oui    | PAT fine-grained : **Contents=Read**, **Deployments=R/W**, **Commit statuses=R/W** |
-| `WEBHOOK_SECRET` | oui    | Secret partagé (≥ 16 car.), envoyé par Dokploy dans le header `x-webhook-secret` |
-| `GITHUB_OWNER`   | oui\*  | Ton compte/orga GitHub. Le repo est supposé porter le même nom que l'app Dokploy |
-| `GITHUB_BRANCH`  | non    | Branche suivie (défaut `main`)                                               |
-| `APP_MAP`        | non    | JSON d'exceptions : `{"nom-app":"owner/repo"}` ou `{"nom-app":"owner/repo@branche"}` |
+| Variable          | Requis | Description                                                                    |
+| ----------------- | ------ | ---------------------------------------------------------------------------- |
+| `GITHUB_TOKEN`    | oui    | PAT fine-grained : **Contents=Read**, **Deployments=R/W**, **Commit statuses=R/W** |
+| `WEBHOOK_SECRET`  | oui    | Secret partagé (≥ 16 car.), envoyé par Dokploy dans le header `x-webhook-secret` |
+| `DOKPLOY_API_KEY` | oui\*  | Clé API Dokploy (Settings → API/Swagger). Le service retrouve seul le repo de chaque app. |
+| `DOKPLOY_URL`     | non    | URL Dokploy si la déduction auto échoue                                      |
+| `GITHUB_BRANCH`   | non    | Branche par défaut (défaut `main`)                                           |
+| `GITHUB_OWNER`    | non    | Fallback si pas d'API Dokploy : `owner`, repo = nom de l'app                 |
+| `APP_MAP`         | non    | Fallback : `{"nom-app":"owner/repo"}` ou `{"nom-app":"owner/repo@branche"}`  |
 
-\* `GITHUB_OWNER` ou `APP_MAP` : au moins un des deux.
+\* `DOKPLOY_API_KEY` **ou** `GITHUB_OWNER`/`APP_MAP`.
 
-## Mise en place (une fois)
+## Mise en place (une fois, ~3 min)
 
 ### 1. Déployer ce service sur Dokploy
 - Create Application → Git → ce repo → build **Dockerfile**
-- Environment : renseigner les variables ci-dessus
+- Environment : `GITHUB_TOKEN`, `WEBHOOK_SECRET`, `DOKPLOY_API_KEY`
 - Domains : générer un domaine, port `3000`, HTTPS
 
-### 2. Créer la notification Webhook Dokploy
+### 2. Générer la clé API Dokploy
+Dokploy → **Settings → API/Swagger** → *Generate API Key* → colle-la dans `DOKPLOY_API_KEY`.
+
+### 3. Créer la notification Webhook Dokploy
 Dokploy → **Notifications** → **Add** → **Webhook**
 - URL : `https://<ton-domaine>/webhook`
 - Custom headers :
@@ -34,15 +39,17 @@ Dokploy → **Notifications** → **Add** → **Webhook**
   x-webhook-secret: <la valeur de WEBHOOK_SECRET>
   ```
 - Événements : **App Deployed** + **Build failed**
-- Create (la notification est globale : elle couvre toutes les apps)
+- Create (globale : couvre toutes les apps, présentes et futures)
 
-### 3. C'est fini
-À chaque déploiement Dokploy, le commit correspondant sur GitHub reçoit son statut.
+### 4. C'est fini
+Aucune config par app. À chaque déploiement, le bon commit GitHub reçoit son statut.
 
 ## Comment ça marche
 
-Dokploy n'envoie ni le repo ni le commit SHA. Le service :
-1. déduit le repo : `APP_MAP[appName]` sinon `GITHUB_OWNER/appName`
+Dokploy n'envoie ni le repo ni le SHA, mais la notification contient un lien vers l'app.
+Le service :
+1. extrait l'`applicationId` du lien, interroge l'API Dokploy → `owner`/`repo`/`branch`
+   (fallback : `APP_MAP` puis `GITHUB_OWNER/appName`)
 2. récupère le dernier commit de la branche via l'API GitHub
 3. pose un deployment status + un commit status (`context: "Dokploy"`)
 
@@ -72,7 +79,7 @@ curl -X POST https://<ton-domaine>/webhook \
 ## Sécurité
 
 - Header `x-webhook-secret` comparé en temps constant (`crypto.timingSafeEqual`).
-- Refuse de démarrer sans `GITHUB_TOKEN`/`WEBHOOK_SECRET` (ou secret < 16 car.), ou sans `GITHUB_OWNER`/`APP_MAP`.
+- Refuse de démarrer sans `GITHUB_TOKEN`/`WEBHOOK_SECRET` (ou secret < 16 car.), ou sans `DOKPLOY_API_KEY`/`GITHUB_OWNER`/`APP_MAP`.
 - `owner`/`repo`/`branch`/URL validés ; body JSON ≤ 16 kb ; timeout 10 s sur GitHub ; `x-powered-by` off.
 - Les erreurs GitHub sont loggées côté serveur, jamais renvoyées au client (500 générique).
 - `npm audit` : 0 vulnérabilité (Express 5, aucune autre dépendance).

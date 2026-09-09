@@ -2,17 +2,19 @@ const crypto = require("crypto");
 const express = require("express");
 
 const app = express();
-// Limite la taille du body pour éviter les abus / DoS
 app.use(express.json({ limit: "16kb" }));
 app.disable("x-powered-by");
 
 const PORT = 3000;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
-// Compte GitHub par défaut : on suppose repo = nom de l'app Dokploy
+// Clé API Dokploy : permet de retrouver automatiquement le repo GitHub de chaque app
+const DOKPLOY_API_KEY = process.env.DOKPLOY_API_KEY || "";
+// URL Dokploy (optionnel : sinon déduite du lien contenu dans la notification)
+const DOKPLOY_URL = (process.env.DOKPLOY_URL || "").replace(/\/+$/, "");
+// Fallbacks facultatifs si on n'utilise pas l'API Dokploy
 const GITHUB_OWNER = process.env.GITHUB_OWNER || "";
 const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
-// Exceptions : {"nom-app-dokploy":"owner/repo"} ou {"nom-app":"owner/repo@branche"}
 let APP_MAP = {};
 try {
   APP_MAP = process.env.APP_MAP ? JSON.parse(process.env.APP_MAP) : {};
@@ -20,7 +22,6 @@ try {
   console.error("[config] APP_MAP n'est pas un JSON valide. Ignoré.");
 }
 
-// On refuse de démarrer sans configuration : évite un service ouvert par erreur
 if (!GITHUB_TOKEN || !WEBHOOK_SECRET) {
   console.error("[config] GITHUB_TOKEN et WEBHOOK_SECRET sont obligatoires. Arrêt.");
   process.exit(1);
@@ -29,16 +30,15 @@ if (WEBHOOK_SECRET.length < 16) {
   console.error("[config] WEBHOOK_SECRET doit faire au moins 16 caractères. Arrêt.");
   process.exit(1);
 }
-if (!GITHUB_OWNER && Object.keys(APP_MAP).length === 0) {
+if (!DOKPLOY_API_KEY && !GITHUB_OWNER && Object.keys(APP_MAP).length === 0) {
   console.error(
-    "[config] Renseigne GITHUB_OWNER (ou APP_MAP) pour identifier les repos. Arrêt."
+    "[config] Fournis DOKPLOY_API_KEY (recommandé) ou GITHUB_OWNER/APP_MAP. Arrêt."
   );
   process.exit(1);
 }
 
 const GITHUB_API = "https://api.github.com";
 
-// Comparaison à temps constant pour éviter les attaques par timing
 function safeEqual(a, b) {
   const bufA = Buffer.from(String(a));
   const bufB = Buffer.from(String(b));
@@ -49,7 +49,6 @@ function safeEqual(a, b) {
 const NAME_RE = /^[A-Za-z0-9_.-]{1,100}$/;
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
 
-// status logique -> state GitHub + description
 const STATE_MAP = {
   pending: { state: "pending", description: "Déploiement en cours..." },
   success: { state: "success", description: "Déployé avec succès ✅" },
@@ -57,7 +56,6 @@ const STATE_MAP = {
   error: { state: "error", description: "Erreur ❌" },
 };
 
-// Formats acceptés en entrée -> status logique
 const INPUT_STATUS = {
   running: "pending",
   pending: "pending",
@@ -68,7 +66,6 @@ const INPUT_STATUS = {
   error: "error",
 };
 
-// L'API commit statuses n'accepte pas "error" comme distinct utile ici
 function toCommitState(state) {
   if (state === "success") return "success";
   if (state === "pending") return "pending";
@@ -86,6 +83,14 @@ function cleanUrl(value) {
   return undefined;
 }
 
+function withTimeout(ms) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms);
+  return { signal: c.signal, done: () => clearTimeout(t) };
+}
+
+// ---------- GitHub ----------
+
 function githubHeaders() {
   return {
     Authorization: `Bearer ${GITHUB_TOKEN}`,
@@ -95,20 +100,14 @@ function githubHeaders() {
   };
 }
 
-async function githubFetch(url, options) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
+async function githubFetch(url, options = {}) {
+  const to = withTimeout(10000);
   let res;
   try {
-    res = await fetch(url, {
-      ...options,
-      headers: githubHeaders(),
-      signal: controller.signal,
-    });
+    res = await fetch(url, { ...options, headers: githubHeaders(), signal: to.signal });
   } finally {
-    clearTimeout(timeout);
+    to.done();
   }
-
   const text = await res.text();
   let data;
   try {
@@ -116,7 +115,6 @@ async function githubFetch(url, options) {
   } catch {
     data = { raw: text };
   }
-
   if (!res.ok) {
     const err = new Error(`GitHub API ${res.status} sur ${url}`);
     err.status = res.status;
@@ -129,25 +127,9 @@ async function githubFetch(url, options) {
 const githubPost = (url, body) =>
   githubFetch(url, { method: "POST", body: JSON.stringify(body) });
 
-// Résout le repo GitHub à partir du nom d'app Dokploy
-function resolveRepo(appName) {
-  const mapped = APP_MAP[appName];
-  if (mapped) {
-    const [full, branch] = String(mapped).split("@");
-    const [owner, repo] = full.split("/");
-    return { owner, repo, branch: branch || GITHUB_BRANCH };
-  }
-  if (GITHUB_OWNER && NAME_RE.test(appName)) {
-    return { owner: GITHUB_OWNER, repo: appName, branch: GITHUB_BRANCH };
-  }
-  return null;
-}
-
-// Récupère le SHA du dernier commit d'une branche
 async function getHeadSha(owner, repo, branch) {
   const data = await githubFetch(
-    `${GITHUB_API}/repos/${owner}/${repo}/commits/${encodeURIComponent(branch)}`,
-    { method: "GET" }
+    `${GITHUB_API}/repos/${owner}/${repo}/commits/${encodeURIComponent(branch)}`
   );
   return data.sha;
 }
@@ -175,16 +157,95 @@ async function setGithubStatus(owner, repo, sha, state, description, url) {
   console.log(`[github] commit status : state=${commitState}`);
 }
 
-// Normalise n'importe quel payload (Dokploy ou manuel) en une intention commune
-function parsePayload(body = {}) {
-  // Format manuel documenté
+// ---------- Résolution du repo ----------
+
+function parseGitUrl(gitUrl) {
+  if (!gitUrl) return null;
+  const m = String(gitUrl).match(
+    /github\.com[/:]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?(?:$|[/?#])/
+  );
+  return m ? { owner: m[1], repo: m[2] } : null;
+}
+
+// Interroge l'API Dokploy pour connaître le repo GitHub d'une application
+async function resolveViaDokploy(buildLink) {
+  if (!DOKPLOY_API_KEY) return null;
+  let base = DOKPLOY_URL;
+  let appId;
+  try {
+    const u = new URL(buildLink);
+    if (!base) base = u.origin;
+    const m = u.pathname.match(/\/application\/([^/?#]+)/);
+    appId = m && m[1];
+  } catch {
+    return null;
+  }
+  if (!base || !appId) return null;
+
+  const to = withTimeout(10000);
+  let res;
+  try {
+    res = await fetch(
+      `${base}/api/application.one?applicationId=${encodeURIComponent(appId)}`,
+      { headers: { "x-api-key": DOKPLOY_API_KEY, Accept: "application/json" }, signal: to.signal }
+    );
+  } finally {
+    to.done();
+  }
+  if (!res.ok) {
+    const err = new Error(`Dokploy API ${res.status}`);
+    err.detail = await res.text().catch(() => "");
+    throw err;
+  }
+  const a = await res.json();
+
+  // Source GitHub native
+  if (a.owner && a.repository) {
+    return { owner: a.owner, repo: a.repository, branch: a.branch || GITHUB_BRANCH };
+  }
+  // Source "git" personnalisée
+  const parsed = parseGitUrl(a.customGitUrl || a.customGitBuildPath);
+  if (parsed) {
+    return { ...parsed, branch: a.customGitBranch || GITHUB_BRANCH };
+  }
+  return null;
+}
+
+function resolveViaConfig(appName) {
+  const mapped = APP_MAP[appName];
+  if (mapped) {
+    const [full, branch] = String(mapped).split("@");
+    const [owner, repo] = full.split("/");
+    if (owner && repo) return { owner, repo, branch: branch || GITHUB_BRANCH };
+  }
+  if (GITHUB_OWNER && NAME_RE.test(appName)) {
+    return { owner: GITHUB_OWNER, repo: appName, branch: GITHUB_BRANCH };
+  }
+  return null;
+}
+
+// ---------- Normalisation du payload ----------
+
+function readStatus(body) {
+  const raw = String(body.status || body.type || "").toLowerCase();
+  const title = String(body.title || "").toLowerCase();
+  if (INPUT_STATUS[raw] && raw !== "build" && raw !== "deploy")
+    return INPUT_STATUS[raw];
+  if (raw === "success" || title.includes("success")) return "success";
+  if (raw === "error" || raw === "failed" || title.includes("fail"))
+    return "failure";
+  return undefined;
+}
+
+async function parsePayload(body = {}) {
+  // Format manuel explicite
   if (body.githubOwner && body.githubRepo) {
     return {
       appName: body.appName,
       status: INPUT_STATUS[String(body.status).toLowerCase()],
       owner: body.githubOwner,
       repo: body.githubRepo,
-      branch: GITHUB_BRANCH,
+      branch: body.branch || GITHUB_BRANCH,
       sha: body.sha,
       url: cleanUrl(body.appUrl),
     };
@@ -193,28 +254,24 @@ function parsePayload(body = {}) {
   // Format notification Dokploy
   const appName = body.applicationName || body.appName;
   if (!appName) return null;
-  const repo = resolveRepo(appName);
+
+  let repo = resolveViaConfig(appName);
+  if (!repo) repo = await resolveViaDokploy(body.buildLink);
   if (!repo) return null;
 
-  const raw = String(body.status || body.type || "").toLowerCase();
-  const title = String(body.title || "").toLowerCase();
-  let status;
-  if (raw === "success" || title.includes("success")) status = "success";
-  else if (raw === "error" || raw === "failed" || title.includes("fail"))
-    status = "failure";
-
   const firstDomain = String(body.domains || "").split(",")[0].trim();
-
   return {
     appName,
-    status,
+    status: readStatus(body),
     owner: repo.owner,
     repo: repo.repo,
     branch: repo.branch,
-    sha: undefined, // Dokploy ne le fournit pas -> récupéré via l'API
+    sha: undefined,
     url: firstDomain ? `https://${firstDomain}` : undefined,
   };
 }
+
+// ---------- Route ----------
 
 app.post("/webhook", async (req, res) => {
   const secret = req.headers["x-webhook-secret"];
@@ -223,13 +280,19 @@ app.post("/webhook", async (req, res) => {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const intent = parsePayload(req.body);
+  let intent;
+  try {
+    intent = await parsePayload(req.body);
+  } catch (err) {
+    console.error("[webhook] résolution repo échouée :", err.message, err.detail || "");
+    return res.status(502).json({ error: "Résolution du repo impossible" });
+  }
+
   if (!intent) {
-    console.warn("[webhook] payload non reconnu -> 400");
+    console.warn("[webhook] payload non reconnu / app inconnue -> 400");
     return res.status(400).json({ error: "Payload non reconnu / app inconnue" });
   }
   if (!intent.status) {
-    // Événement neutre (build démarré, etc.) : on accuse réception sans agir
     console.log(`[webhook] app=${intent.appName} : événement ignoré`);
     return res.json({ ok: true, ignored: true });
   }
@@ -246,9 +309,8 @@ app.post("/webhook", async (req, res) => {
     let sha = intent.sha;
     if (!SHA_RE.test(sha || "")) {
       sha = await getHeadSha(intent.owner, intent.repo, intent.branch);
-      console.log(`[webhook] SHA résolu via API : ${sha.slice(0, 7)}`);
+      console.log(`[webhook] SHA résolu : ${sha.slice(0, 7)}`);
     }
-
     await setGithubStatus(
       intent.owner,
       intent.repo,

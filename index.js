@@ -182,11 +182,25 @@ app.post("/webhook", async (req, res) => {
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// Route de diagnostic : log le payload brut envoyé par Dokploy (à retirer ensuite)
+// Route de diagnostic : mémorise le dernier payload reçu (à retirer ensuite)
+let lastDebug = null;
 app.post("/debug", (req, res) => {
-  console.log("[debug] headers :", JSON.stringify(req.headers));
-  console.log("[debug] body :", JSON.stringify(req.body, null, 2));
+  lastDebug = {
+    receivedAt: new Date().toISOString(),
+    headers: req.headers,
+    body: req.body,
+  };
+  console.log("[debug] payload reçu :", JSON.stringify(lastDebug, null, 2));
   res.json({ ok: true });
+});
+app.get("/debug", (_req, res) => {
+  res
+    .type("text/plain")
+    .send(
+      lastDebug
+        ? JSON.stringify(lastDebug, null, 2)
+        : "Aucun payload reçu pour l'instant. Déclenche un déploiement dans Dokploy."
+    );
 });
 
 app.listen(PORT, () => {

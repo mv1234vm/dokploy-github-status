@@ -9,16 +9,30 @@ app.disable("x-powered-by");
 const PORT = 3000;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
+// Compte GitHub par défaut : on suppose repo = nom de l'app Dokploy
+const GITHUB_OWNER = process.env.GITHUB_OWNER || "";
+const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
+// Exceptions : {"nom-app-dokploy":"owner/repo"} ou {"nom-app":"owner/repo@branche"}
+let APP_MAP = {};
+try {
+  APP_MAP = process.env.APP_MAP ? JSON.parse(process.env.APP_MAP) : {};
+} catch {
+  console.error("[config] APP_MAP n'est pas un JSON valide. Ignoré.");
+}
 
 // On refuse de démarrer sans configuration : évite un service ouvert par erreur
 if (!GITHUB_TOKEN || !WEBHOOK_SECRET) {
-  console.error(
-    "[config] GITHUB_TOKEN et WEBHOOK_SECRET sont obligatoires. Arrêt."
-  );
+  console.error("[config] GITHUB_TOKEN et WEBHOOK_SECRET sont obligatoires. Arrêt.");
   process.exit(1);
 }
 if (WEBHOOK_SECRET.length < 16) {
   console.error("[config] WEBHOOK_SECRET doit faire au moins 16 caractères. Arrêt.");
+  process.exit(1);
+}
+if (!GITHUB_OWNER && Object.keys(APP_MAP).length === 0) {
+  console.error(
+    "[config] Renseigne GITHUB_OWNER (ou APP_MAP) pour identifier les repos. Arrêt."
+  );
   process.exit(1);
 }
 
@@ -32,26 +46,35 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
-// Autorise uniquement "owner/repo" au format GitHub (pas de path traversal ni d'URL)
 const NAME_RE = /^[A-Za-z0-9_.-]{1,100}$/;
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
 
-// Mapping status Dokploy -> GitHub (deployment status state + description)
-const STATUS_MAP = {
-  running: { state: "pending", description: "Déploiement en cours..." },
-  done: { state: "success", description: "Déployé avec succès ✅" },
-  failed: { state: "failure", description: "Échec du déploiement ❌" },
+// status logique -> state GitHub + description
+const STATE_MAP = {
+  pending: { state: "pending", description: "Déploiement en cours..." },
+  success: { state: "success", description: "Déployé avec succès ✅" },
+  failure: { state: "failure", description: "Échec du déploiement ❌" },
   error: { state: "error", description: "Erreur ❌" },
 };
 
-// Conversion pour l'API commit statuses (états supportés : pending/success/failure/error)
+// Formats acceptés en entrée -> status logique
+const INPUT_STATUS = {
+  running: "pending",
+  pending: "pending",
+  done: "success",
+  success: "success",
+  failed: "failure",
+  failure: "failure",
+  error: "error",
+};
+
+// L'API commit statuses n'accepte pas "error" comme distinct utile ici
 function toCommitState(state) {
   if (state === "success") return "success";
   if (state === "pending") return "pending";
   return "failure";
 }
 
-// Valide et normalise une URL http(s) ; renvoie undefined si invalide
 function cleanUrl(value) {
   if (!value) return undefined;
   try {
@@ -72,15 +95,14 @@ function githubHeaders() {
   };
 }
 
-async function githubRequest(url, body) {
+async function githubFetch(url, options) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
   let res;
   try {
     res = await fetch(url, {
-      method: "POST",
+      ...options,
       headers: githubHeaders(),
-      body: JSON.stringify(body),
       signal: controller.signal,
     });
   } finally {
@@ -96,40 +118,102 @@ async function githubRequest(url, body) {
   }
 
   if (!res.ok) {
-    // On logge le détail côté serveur uniquement, jamais renvoyé au client
     const err = new Error(`GitHub API ${res.status} sur ${url}`);
     err.status = res.status;
     err.detail = data;
     throw err;
   }
-
   return data;
 }
 
+const githubPost = (url, body) =>
+  githubFetch(url, { method: "POST", body: JSON.stringify(body) });
+
+// Résout le repo GitHub à partir du nom d'app Dokploy
+function resolveRepo(appName) {
+  const mapped = APP_MAP[appName];
+  if (mapped) {
+    const [full, branch] = String(mapped).split("@");
+    const [owner, repo] = full.split("/");
+    return { owner, repo, branch: branch || GITHUB_BRANCH };
+  }
+  if (GITHUB_OWNER && NAME_RE.test(appName)) {
+    return { owner: GITHUB_OWNER, repo: appName, branch: GITHUB_BRANCH };
+  }
+  return null;
+}
+
+// Récupère le SHA du dernier commit d'une branche
+async function getHeadSha(owner, repo, branch) {
+  const data = await githubFetch(
+    `${GITHUB_API}/repos/${owner}/${repo}/commits/${encodeURIComponent(branch)}`,
+    { method: "GET" }
+  );
+  return data.sha;
+}
+
 async function setGithubStatus(owner, repo, sha, state, description, url) {
-  // 1. Créer un deployment
-  const deployment = await githubRequest(
+  const deployment = await githubPost(
     `${GITHUB_API}/repos/${owner}/${repo}/deployments`,
     { ref: sha, auto_merge: false, required_contexts: [] }
   );
   console.log(`[github] deployment créé : id=${deployment.id}`);
 
-  // 2. Créer un deployment status
-  await githubRequest(
+  await githubPost(
     `${GITHUB_API}/repos/${owner}/${repo}/deployments/${deployment.id}/statuses`,
     { state, description, environment_url: url, auto_inactive: true }
   );
-  console.log(`[github] deployment status mis à jour : state=${state}`);
+  console.log(`[github] deployment status : state=${state}`);
 
-  // 3. Créer un commit status
   const commitState = toCommitState(state);
-  await githubRequest(`${GITHUB_API}/repos/${owner}/${repo}/statuses/${sha}`, {
+  await githubPost(`${GITHUB_API}/repos/${owner}/${repo}/statuses/${sha}`, {
     state: commitState,
     description,
     context: "Dokploy",
     target_url: url,
   });
-  console.log(`[github] commit status mis à jour : state=${commitState}`);
+  console.log(`[github] commit status : state=${commitState}`);
+}
+
+// Normalise n'importe quel payload (Dokploy ou manuel) en une intention commune
+function parsePayload(body = {}) {
+  // Format manuel documenté
+  if (body.githubOwner && body.githubRepo) {
+    return {
+      appName: body.appName,
+      status: INPUT_STATUS[String(body.status).toLowerCase()],
+      owner: body.githubOwner,
+      repo: body.githubRepo,
+      branch: GITHUB_BRANCH,
+      sha: body.sha,
+      url: cleanUrl(body.appUrl),
+    };
+  }
+
+  // Format notification Dokploy
+  const appName = body.applicationName || body.appName;
+  if (!appName) return null;
+  const repo = resolveRepo(appName);
+  if (!repo) return null;
+
+  const raw = String(body.status || body.type || "").toLowerCase();
+  const title = String(body.title || "").toLowerCase();
+  let status;
+  if (raw === "success" || title.includes("success")) status = "success";
+  else if (raw === "error" || raw === "failed" || title.includes("fail"))
+    status = "failure";
+
+  const firstDomain = String(body.domains || "").split(",")[0].trim();
+
+  return {
+    appName,
+    status,
+    owner: repo.owner,
+    repo: repo.repo,
+    branch: repo.branch,
+    sha: undefined, // Dokploy ne le fournit pas -> récupéré via l'API
+    url: firstDomain ? `https://${firstDomain}` : undefined,
+  };
 }
 
 app.post("/webhook", async (req, res) => {
@@ -139,33 +223,39 @@ app.post("/webhook", async (req, res) => {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const { appName, status, sha, githubOwner, githubRepo, appUrl } =
-    req.body || {};
+  const intent = parsePayload(req.body);
+  if (!intent) {
+    console.warn("[webhook] payload non reconnu -> 400");
+    return res.status(400).json({ error: "Payload non reconnu / app inconnue" });
+  }
+  if (!intent.status) {
+    // Événement neutre (build démarré, etc.) : on accuse réception sans agir
+    console.log(`[webhook] app=${intent.appName} : événement ignoré`);
+    return res.json({ ok: true, ignored: true });
+  }
+  if (!NAME_RE.test(intent.owner || "") || !NAME_RE.test(intent.repo || "")) {
+    return res.status(400).json({ error: "owner/repo invalide" });
+  }
 
-  if (!NAME_RE.test(githubOwner || "") || !NAME_RE.test(githubRepo || "")) {
-    return res.status(400).json({ error: "githubOwner/githubRepo invalide" });
-  }
-  if (!SHA_RE.test(sha || "")) {
-    return res.status(400).json({ error: "sha invalide" });
-  }
-  const mapped = STATUS_MAP[status];
-  if (!mapped) {
-    return res.status(400).json({ error: `Status inconnu : ${status}` });
-  }
-
-  const safeApp = typeof appName === "string" ? appName.slice(0, 100) : "?";
+  const mapped = STATE_MAP[intent.status];
   console.log(
-    `[webhook] reçu : app=${safeApp} status=${status} repo=${githubOwner}/${githubRepo} sha=${sha.slice(0, 7)}`
+    `[webhook] app=${intent.appName} status=${intent.status} -> ${mapped.state} (${intent.owner}/${intent.repo}@${intent.branch})`
   );
 
   try {
+    let sha = intent.sha;
+    if (!SHA_RE.test(sha || "")) {
+      sha = await getHeadSha(intent.owner, intent.repo, intent.branch);
+      console.log(`[webhook] SHA résolu via API : ${sha.slice(0, 7)}`);
+    }
+
     await setGithubStatus(
-      githubOwner,
-      githubRepo,
+      intent.owner,
+      intent.repo,
       sha,
       mapped.state,
       mapped.description,
-      cleanUrl(appUrl)
+      intent.url
     );
     console.log("[webhook] statuts GitHub mis à jour avec succès");
     return res.json({ ok: true, state: mapped.state });
@@ -175,33 +265,11 @@ app.post("/webhook", async (req, res) => {
       err.message,
       JSON.stringify(err.detail || {})
     );
-    // Message générique : aucun détail interne renvoyé au client
     return res.status(500).json({ error: "Échec de la mise à jour GitHub" });
   }
 });
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
-
-// Route de diagnostic : mémorise le dernier payload reçu (à retirer ensuite)
-let lastDebug = null;
-app.post("/debug", (req, res) => {
-  lastDebug = {
-    receivedAt: new Date().toISOString(),
-    headers: req.headers,
-    body: req.body,
-  };
-  console.log("[debug] payload reçu :", JSON.stringify(lastDebug, null, 2));
-  res.json({ ok: true });
-});
-app.get("/debug", (_req, res) => {
-  res
-    .type("text/plain")
-    .send(
-      lastDebug
-        ? JSON.stringify(lastDebug, null, 2)
-        : "Aucun payload reçu pour l'instant. Déclenche un déploiement dans Dokploy."
-    );
-});
 
 app.listen(PORT, () => {
   console.log(`dokploy-github-status en écoute sur le port ${PORT}`);

@@ -247,10 +247,13 @@ async function resolveViaDokploy(buildLink) {
     return null;
   }
   if (!appId) return null;
+  learnedAppIds.add(appId);
   const a = await dokployGet(
     `/api/application.one?applicationId=${encodeURIComponent(appId)}`
   );
-  return repoFromApp(a);
+  const repo = repoFromApp(a);
+  appRepoCache.set(appId, repo);
+  return repo;
 }
 
 function resolveViaConfig(appName) {
@@ -274,24 +277,58 @@ const POLL_INTERVAL_MS = Math.max(
   Number(process.env.POLL_INTERVAL_MS) || 5000
 );
 const seenDeployments = new Map(); // applicationId -> dernier deploymentId "en cours" traité
+const appRepoCache = new Map(); // applicationId -> {owner,repo,branch} | null
+const learnedAppIds = new Set(); // ids vus via les notifications /webhook
 let pollerStarted = false;
 
-function collectApplications(projects) {
-  const apps = [];
-  for (const p of Array.isArray(projects) ? projects : []) {
-    for (const a of p.applications || []) apps.push(a);
+// Récupère (et met en cache) le repo GitHub d'une application via son id
+async function getAppRepo(applicationId) {
+  if (appRepoCache.has(applicationId)) return appRepoCache.get(applicationId);
+  let repo = null;
+  try {
+    const a = await dokployGet(
+      `/api/application.one?applicationId=${encodeURIComponent(applicationId)}`
+    );
+    repo = repoFromApp(a);
+  } catch {
+    /* app inaccessible / pas une application : on garde null */
   }
-  return apps;
+  appRepoCache.set(applicationId, repo);
+  return repo;
+}
+
+// Parcourt récursivement la réponse project.all (project -> environments -> applications)
+function walkAppIds(node, out = new Set()) {
+  if (!node || typeof node !== "object") return out;
+  if (Array.isArray(node)) {
+    for (const item of node) walkAppIds(item, out);
+    return out;
+  }
+  if (
+    typeof node.applicationId === "string" &&
+    (node.appName || node.name || "applicationStatus" in node)
+  ) {
+    out.add(node.applicationId);
+  }
+  for (const v of Object.values(node)) walkAppIds(v, out);
+  return out;
+}
+
+async function listAppIds() {
+  const ids = new Set(learnedAppIds);
+  try {
+    const projects = await dokployGet("/api/project.all");
+    for (const id of walkAppIds(projects)) ids.add(id);
+  } catch (err) {
+    console.warn("[poll] project.all indisponible :", err.message);
+  }
+  return ids;
 }
 
 async function pollOnce() {
-  const projects = await dokployGet("/api/project.all");
-  if (!projects) return;
-
-  for (const app of collectApplications(projects)) {
-    const id = app.applicationId;
-    if (!id) continue;
-    const repo = repoFromApp(app);
+  const ids = await listAppIds();
+  for (const id of ids) {
+    const repo = await getAppRepo(id);
     if (!repo) continue;
 
     let deployments;
@@ -303,21 +340,20 @@ async function pollOnce() {
       continue;
     }
     const latest = Array.isArray(deployments) ? deployments[0] : null;
-    if (!latest) continue;
-
-    const status = String(latest.status || "").toLowerCase();
-    if (status !== "running") continue;
+    if (!latest || String(latest.status || "").toLowerCase() !== "running") continue;
     if (seenDeployments.get(id) === latest.deploymentId) continue;
     seenDeployments.set(id, latest.deploymentId);
 
     try {
       const sha = await getHeadSha(repo.owner, repo.repo, repo.branch);
-      const target = dokployBase
-        ? `${dokployBase}/dashboard/project`
-        : undefined;
-      await setPendingStatus(repo.owner, repo.repo, sha, target);
+      await setPendingStatus(
+        repo.owner,
+        repo.repo,
+        sha,
+        dokployBase ? `${dokployBase}/dashboard/projects` : undefined
+      );
       console.log(
-        `[poll] ${app.name || app.appName} en cours -> pending (${repo.owner}/${repo.repo} ${sha.slice(0, 7)})`
+        `[poll] ${repo.owner}/${repo.repo} en cours -> pending (${sha.slice(0, 7)})`
       );
     } catch (err) {
       console.error("[poll] échec pending :", err.message);
@@ -486,6 +522,37 @@ app.post("/github", async (req, res) => {
 });
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// Diagnostic du poller : GET /debug-poll?secret=<WEBHOOK_SECRET>
+app.get("/debug-poll", async (req, res) => {
+  if (!safeEqual(req.query.secret || "", WEBHOOK_SECRET)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  const out = { dokployBase, learnedAppIds: [...learnedAppIds], projectAll: null, apps: [] };
+  try {
+    out.projectAll = await dokployGet("/api/project.all");
+  } catch (err) {
+    out.projectAllError = err.message + " " + (err.detail || "");
+  }
+  const ids = await listAppIds();
+  for (const id of ids) {
+    const entry = { id };
+    try {
+      entry.app = await dokployGet(`/api/application.one?applicationId=${encodeURIComponent(id)}`);
+      entry.repo = repoFromApp(entry.app);
+    } catch (err) {
+      entry.appError = err.message;
+    }
+    try {
+      const d = await dokployGet(`/api/deployment.all?applicationId=${encodeURIComponent(id)}`);
+      entry.latestDeployment = Array.isArray(d) ? d[0] : d;
+    } catch (err) {
+      entry.deploymentError = err.message;
+    }
+    out.apps.push(entry);
+  }
+  res.type("application/json").send(JSON.stringify(out, null, 2));
+});
 
 app.get("/", (_req, res) => {
   res

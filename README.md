@@ -55,21 +55,23 @@ Le service :
 
 Le lien **Details** sur GitHub pointe vers la page de logs du déploiement Dokploy.
 
-## Statut « en cours » (optionnel)
+## Statut « en cours » (pastille jaune)
 
-Dokploy ne notifie qu'à la fin. Pour avoir la pastille jaune « Déploiement en cours »
-dès le `git push`, ajoute un webhook GitHub :
+Dokploy ne notifie qu'à la fin. Deux façons d'avoir le jaune :
 
-1. Choisis un secret (`openssl rand -hex 16`) et mets-le dans `GITHUB_WEBHOOK_SECRET`
-   (Environment du service) → Redeploy.
-2. GitHub → repo (ou **organisation** pour tout couvrir d'un coup) → Settings →
-   **Webhooks** → Add webhook :
+### Option auto (recommandée, zéro config par repo)
+Ajoute `DOKPLOY_URL=https://ton-dokploy` dans l'Environment du service → Redeploy.
+Le service interroge l'API Dokploy toutes les 15 s ; dès qu'un déploiement est
+`running`, il pose le statut `pending` sur le commit. Rien d'autre à faire.
+Désactiver : `POLL=off`.
+
+### Option webhook GitHub push
+1. Secret (`openssl rand -hex 16`) dans `GITHUB_WEBHOOK_SECRET` → Redeploy.
+2. GitHub → repo/organisation → Settings → **Webhooks** → Add webhook :
    - Payload URL : `https://<ton-domaine>/github`
    - Content type : `application/json`
-   - Secret : le même que `GITHUB_WEBHOOK_SECRET`
+   - Secret : le même
    - Events : *Just the push event*
-
-Ensuite : push → jaune, puis Dokploy termine → vert/rouge.
 
 ## Format manuel (optionnel)
 

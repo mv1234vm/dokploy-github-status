@@ -197,48 +197,60 @@ function parseGitUrl(gitUrl) {
   return m ? { owner: m[1], repo: m[2] } : null;
 }
 
+// URL Dokploy : fournie par env, sinon apprise depuis le lien d'une notification
+let dokployBase = DOKPLOY_URL;
+
+async function dokployGet(path) {
+  if (!DOKPLOY_API_KEY || !dokployBase) return null;
+  const to = withTimeout(10000);
+  let res;
+  try {
+    res = await fetch(`${dokployBase}${path}`, {
+      headers: { "x-api-key": DOKPLOY_API_KEY, Accept: "application/json" },
+      signal: to.signal,
+    });
+  } finally {
+    to.done();
+  }
+  if (!res.ok) {
+    const err = new Error(`Dokploy API ${res.status} sur ${path}`);
+    err.detail = await res.text().catch(() => "");
+    throw err;
+  }
+  return res.json();
+}
+
+// Extrait owner/repo/branch d'un objet application Dokploy
+function repoFromApp(a) {
+  if (!a) return null;
+  if (a.owner && a.repository) {
+    return { owner: a.owner, repo: a.repository, branch: a.branch || GITHUB_BRANCH };
+  }
+  const parsed = parseGitUrl(a.customGitUrl || a.customGitBuildPath);
+  if (parsed) return { ...parsed, branch: a.customGitBranch || GITHUB_BRANCH };
+  return null;
+}
+
 // Interroge l'API Dokploy pour connaître le repo GitHub d'une application
 async function resolveViaDokploy(buildLink) {
   if (!DOKPLOY_API_KEY) return null;
-  let base = DOKPLOY_URL;
   let appId;
   try {
     const u = new URL(buildLink);
-    if (!base) base = u.origin;
+    if (!dokployBase) {
+      dokployBase = u.origin;
+      startPoller();
+    }
     const m = u.pathname.match(/\/application\/([^/?#]+)/);
     appId = m && m[1];
   } catch {
     return null;
   }
-  if (!base || !appId) return null;
-
-  const to = withTimeout(10000);
-  let res;
-  try {
-    res = await fetch(
-      `${base}/api/application.one?applicationId=${encodeURIComponent(appId)}`,
-      { headers: { "x-api-key": DOKPLOY_API_KEY, Accept: "application/json" }, signal: to.signal }
-    );
-  } finally {
-    to.done();
-  }
-  if (!res.ok) {
-    const err = new Error(`Dokploy API ${res.status}`);
-    err.detail = await res.text().catch(() => "");
-    throw err;
-  }
-  const a = await res.json();
-
-  // Source GitHub native
-  if (a.owner && a.repository) {
-    return { owner: a.owner, repo: a.repository, branch: a.branch || GITHUB_BRANCH };
-  }
-  // Source "git" personnalisée
-  const parsed = parseGitUrl(a.customGitUrl || a.customGitBuildPath);
-  if (parsed) {
-    return { ...parsed, branch: a.customGitBranch || GITHUB_BRANCH };
-  }
-  return null;
+  if (!appId) return null;
+  const a = await dokployGet(
+    `/api/application.one?applicationId=${encodeURIComponent(appId)}`
+  );
+  return repoFromApp(a);
 }
 
 function resolveViaConfig(appName) {
@@ -252,6 +264,75 @@ function resolveViaConfig(appName) {
     return { owner: GITHUB_OWNER, repo: appName, branch: GITHUB_BRANCH };
   }
   return null;
+}
+
+// ---------- Surveillance auto de Dokploy (statut "en cours") ----------
+
+const POLL_ENABLED = (process.env.POLL || "on").toLowerCase() !== "off";
+const POLL_INTERVAL_MS = Math.max(
+  5000,
+  Number(process.env.POLL_INTERVAL_MS) || 15000
+);
+const seenDeployments = new Map(); // applicationId -> dernier deploymentId "en cours" traité
+let pollerStarted = false;
+
+function collectApplications(projects) {
+  const apps = [];
+  for (const p of Array.isArray(projects) ? projects : []) {
+    for (const a of p.applications || []) apps.push(a);
+  }
+  return apps;
+}
+
+async function pollOnce() {
+  const projects = await dokployGet("/api/project.all");
+  if (!projects) return;
+
+  for (const app of collectApplications(projects)) {
+    const id = app.applicationId;
+    if (!id) continue;
+    const repo = repoFromApp(app);
+    if (!repo) continue;
+
+    let deployments;
+    try {
+      deployments = await dokployGet(
+        `/api/deployment.all?applicationId=${encodeURIComponent(id)}`
+      );
+    } catch {
+      continue;
+    }
+    const latest = Array.isArray(deployments) ? deployments[0] : null;
+    if (!latest) continue;
+
+    const status = String(latest.status || "").toLowerCase();
+    if (status !== "running") continue;
+    if (seenDeployments.get(id) === latest.deploymentId) continue;
+    seenDeployments.set(id, latest.deploymentId);
+
+    try {
+      const sha = await getHeadSha(repo.owner, repo.repo, repo.branch);
+      const target = dokployBase
+        ? `${dokployBase}/dashboard/project`
+        : undefined;
+      await setPendingStatus(repo.owner, repo.repo, sha, target);
+      console.log(
+        `[poll] ${app.name || app.appName} en cours -> pending (${repo.owner}/${repo.repo} ${sha.slice(0, 7)})`
+      );
+    } catch (err) {
+      console.error("[poll] échec pending :", err.message);
+    }
+  }
+}
+
+function startPoller() {
+  if (pollerStarted || !POLL_ENABLED || !DOKPLOY_API_KEY || !dokployBase) return;
+  pollerStarted = true;
+  console.log(`[poll] surveillance Dokploy active (toutes les ${POLL_INTERVAL_MS} ms)`);
+  const tick = () =>
+    pollOnce().catch((err) => console.error("[poll] erreur :", err.message));
+  tick();
+  setInterval(tick, POLL_INTERVAL_MS).unref();
 }
 
 // ---------- Normalisation du payload ----------
@@ -423,4 +504,5 @@ app.get("/", (_req, res) => {
 
 app.listen(PORT, () => {
   console.log(`dokploy-github-status en écoute sur le port ${PORT}`);
+  startPoller(); // démarre si DOKPLOY_URL est connu ; sinon au 1er webhook reçu
 });

@@ -61,7 +61,7 @@ Dokploy ne notifie qu'à la fin. Deux façons d'avoir le jaune :
 
 ### Option auto (recommandée, zéro config par repo)
 Ajoute `DOKPLOY_URL=https://ton-dokploy` dans l'Environment du service → Redeploy.
-Le service interroge l'API Dokploy toutes les 15 s ; dès qu'un déploiement est
+Le service interroge l'API Dokploy toutes les 5 s ; dès qu'un déploiement est
 `running`, il pose le statut `pending` sur le commit. Rien d'autre à faire.
 Désactiver : `POLL=off`.
 

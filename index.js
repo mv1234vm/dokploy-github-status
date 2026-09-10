@@ -270,8 +270,8 @@ function resolveViaConfig(appName) {
 
 const POLL_ENABLED = (process.env.POLL || "on").toLowerCase() !== "off";
 const POLL_INTERVAL_MS = Math.max(
-  5000,
-  Number(process.env.POLL_INTERVAL_MS) || 15000
+  2000,
+  Number(process.env.POLL_INTERVAL_MS) || 5000
 );
 const seenDeployments = new Map(); // applicationId -> dernier deploymentId "en cours" traité
 let pollerStarted = false;

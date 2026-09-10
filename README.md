@@ -98,7 +98,7 @@ curl -X POST https://<ton-domaine>/webhook \
 
 - Header `x-webhook-secret` comparé en temps constant (`crypto.timingSafeEqual`).
 - Refuse de démarrer sans `GITHUB_TOKEN`/`WEBHOOK_SECRET` (ou secret < 16 car.), ou sans `DOKPLOY_API_KEY`/`GITHUB_OWNER`/`APP_MAP`.
-- `owner`/`repo`/`branch`/URL validés ; body JSON ≤ 16 kb ; timeout 10 s sur GitHub ; `x-powered-by` off.
+- `owner`/`repo`/`branch`/URL validés ; body JSON ≤ 1 Mo ; timeout 10 s sur les appels sortants ; `x-powered-by` off.
 - Les erreurs GitHub sont loggées côté serveur, jamais renvoyées au client (500 générique).
 - `npm audit` : 0 vulnérabilité (Express 5, aucune autre dépendance).
 - À exposer uniquement en HTTPS ; garder `WEBHOOK_SECRET` et `GITHUB_TOKEN` hors du dépôt.

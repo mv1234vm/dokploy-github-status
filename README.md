@@ -33,6 +33,8 @@ Dokploy.
 - [Comment ça marche en détail](#comment-ça-marche-en-détail)
 - [Statut « en cours »](#statut--en-cours-)
 - [Pages de déploiement `/deployments/:id`](#pages-de-déploiement-deploymentsid)
+- [Persistance](#persistance)
+- [Liste + état de santé de tous les sites](#liste--état-de-santé-de-tous-les-sites-deployments)
 - [Fiabilité (pending bloqués, statuts manquants)](#fiabilité-pending-bloqués-statuts-manquants)
 - [Sécurité](#sécurité)
 - [Format manuel / test](#format-manuel--test)
@@ -111,7 +113,8 @@ commit GitHub reçoit sa pastille, cliquable vers sa page de détail.
 | `POLL_INTERVAL_MS` | non | Fréquence du sondage, en ms (défaut `5000`, plancher `2000`) |
 | `CATCHUP_MAX_AGE_MS` | non | Le rattrapage de statuts manqués ne concerne que les déploiements finis il y a moins de X ms (défaut 15 min, plancher 1 min) — évite de reposter tout l'historique récent au redémarrage du service |
 | `PUBLIC_URL` | non | URL publique de **ce service**, sans `/` final — active les pages `/deployments/:id` |
-| `DASHBOARD_PASSWORD` | non | Mot de passe pour ouvrir une page `/deployments/:id` en dehors d'un clic GitHub |
+| `DASHBOARD_PASSWORD` | non | Mot de passe pour ouvrir une page `/deployments/:id` en dehors d'un clic GitHub, et pour tout ce qui est derrière `/deployments` (liste, santé, relance) |
+| `DATA_DIR` | non | Dossier où persister `deployments.json` (défaut `./data`) — voir [Persistance](#persistance) |
 
 \* Il faut `DOKPLOY_API_KEY` **ou** `GITHUB_OWNER`/`APP_MAP` (au moins un des
 deux).
@@ -123,9 +126,12 @@ deux).
 | `POST /webhook` | Notification Dokploy (fin de déploiement) |
 | `POST /github` | Webhook GitHub *push* optionnel, pour le statut « en cours » instantané |
 | `GET /deployments/:id` | Page de détail d'un déploiement (HTML) |
-| `GET /api/deployments/:id` | Données JSON d'un déploiement, protégées par jeton |
+| `GET /api/deployments/:id` | Données JSON d'un déploiement, protégées par jeton (lien ou session) |
+| `GET /deployments` | Liste + état de santé de tous les sites (HTML, **mot de passe requis**) |
+| `GET /api/deployments` | Liste + santé en JSON, **jeton de session uniquement** (un jeton de lien ne fonctionne pas ici) |
+| `POST /api/deployments/:id/retry` | Relance le déploiement via l'API Dokploy, **jeton de session uniquement** |
 | `POST /api/login` | Échange un mot de passe contre un jeton de session |
-| `GET /health` | Vérification de disponibilité |
+| `GET /health` | Vérification de disponibilité + état du sondage Dokploy |
 | `GET /` | Page d'accueil du service |
 
 ## Comment ça marche en détail
@@ -194,12 +200,38 @@ mot de passe au prochain accès direct.
 `DASHBOARD_PASSWORD`, ni les données d'un autre déploiement que celui
 demandé et autorisé.
 
-**Limite assumée** : l'historique est **en mémoire** (200 déploiements les
-plus récents, quelques centaines de Ko — négligeable). Un redémarrage du
-service (redéploiement de lui-même, par exemple) repart de zéro ; les
-anciennes pages renvoient alors un 404 propre plutôt que d'inventer des
-données. Sans `PUBLIC_URL` configuré, cette fonctionnalité est simplement
-inactive et les liens *Details* pointent vers les logs Dokploy comme avant.
+Sans `PUBLIC_URL` configuré, cette fonctionnalité est simplement inactive et
+les liens *Details* pointent vers les logs Dokploy comme avant.
+
+## Persistance
+
+L'historique (300 déploiements les plus récents, quelques centaines de Ko)
+est sauvegardé dans `DATA_DIR/deployments.json` (défaut : `./data`), rechargé
+au démarrage. Ça survit à un **redémarrage du process** dans le même
+conteneur (crash, `npm start` relancé). Ça ne survit **pas** à un
+**redéploiement** (nouvelle image = nouveau conteneur = disque vierge), sauf
+si `DATA_DIR` pointe vers un **volume Dokploy monté** — sinon, redéployer ce
+service lui-même repart de zéro comme avant (les anciennes pages `/deployments/:id`
+renvoient alors un 404 propre plutôt que d'inventer des données).
+
+## Liste + état de santé de tous les sites (`/deployments`)
+
+Une page `/deployments` liste les derniers déploiements suivis et l'état de
+santé courant de chaque repo (dernier statut connu). **Toujours** protégée
+par `DASHBOARD_PASSWORD` — contrairement à `/deployments/:id`, un jeton de
+lien posé sur GitHub (scopé à un seul déploiement) ne donne **jamais** accès
+ici, seul le mot de passe (jeton de session) le permet. Si
+`DASHBOARD_PASSWORD` n'est pas configuré, ces routes renvoient 503.
+
+### Relancer un déploiement échoué
+
+Sur la page d'un déploiement en échec, un bouton **Relancer** (visible
+uniquement si connecté par mot de passe, jamais via un simple lien GitHub)
+déclenche un nouveau déploiement via l'API Dokploy
+(`POST /api/application.deploy`) pour l'`applicationId` concerné. Fonctionne
+uniquement pour les déploiements créés après cette mise à jour (c'est là que
+`applicationId` a commencé à être enregistré) ; sinon message d'erreur
+explicite plutôt qu'un bouton qui ne fait rien.
 
 ## Fiabilité (pending bloqués, statuts manquants)
 
@@ -264,9 +296,10 @@ réussi, `failed`/`failure` → échoué, `error` → erreur.
 
 ```
 index.js             serveur Express, routes, poller Dokploy, logique GitHub
-store.js             historique en mémoire des déploiements (par id GitHub)
+store.js             historique persisté (JSON) des déploiements (par id GitHub)
 auth.js              jetons de session/lien signés (HMAC), sans état serveur
 deployment-page.js   page HTML de /deployments/:id (rendu + auth côté client)
+admin-page.js        page HTML de /deployments (liste + santé, mot de passe requis)
 Dockerfile           image de déploiement (node:20-alpine)
 ```
 
@@ -292,3 +325,5 @@ npm start
 | Clic GitHub demande un mot de passe | Le lien a été généré avant que `PUBLIC_URL` soit configuré, ou le jeton a expiré (90 j) |
 | Erreur GitHub 401/403 | Régénérer `GITHUB_TOKEN` avec les bonnes permissions |
 | Rafale de nouveaux "Deployments" GitHub juste après un redémarrage | Normal si un déploiement s'est **réellement** terminé il y a moins de `CATCHUP_MAX_AGE_MS` (15 min par défaut) juste avant/pendant le redémarrage — c'est le filet de rattrapage qui fait son travail. Si ça concerne des commits bien plus anciens, vérifier `CATCHUP_MAX_AGE_MS` |
+| `/health` renvoie `"ok": false` | Le sondage Dokploy échoue depuis plusieurs tentatives (`pollFailureStreak`/`lastPollError` dans la réponse) — vérifier que `DOKPLOY_API_KEY` n'a pas expiré et que `DOKPLOY_URL` est joignable |
+| Bouton "Relancer" en erreur | Le déploiement n'a pas d'`applicationId` enregistré (créé avant cette mise à jour), ou l'endpoint `/api/application.deploy` a changé côté Dokploy — vérifier les logs `[retry]` |

@@ -3,6 +3,7 @@ const express = require("express");
 const store = require("./store");
 const { makeSigner } = require("./auth");
 const { renderDeploymentPage } = require("./deployment-page");
+const { renderAdminPage } = require("./admin-page");
 
 const app = express();
 // On garde le corps brut pour vérifier la signature des webhooks GitHub
@@ -250,6 +251,7 @@ async function setGithubStatus(owner, repo, sha, state, description, url, logUrl
       sha,
       branch: meta.branch,
       appName: meta.appName,
+      applicationId: meta.applicationId,
       environment: meta.environment || "production",
       appUrl: url || null,
       dokployLogUrl: logUrl || null,
@@ -359,18 +361,46 @@ async function dokployGet(path) {
   return res.json();
 }
 
-// Extrait owner/repo/branch (+ nom d'app et URL publique, pour l'affichage
-// sur /deployments/:id) d'un objet application Dokploy
+async function dokployPost(path, body) {
+  if (!DOKPLOY_API_KEY || !dokployBase) throw new Error("Dokploy non configuré");
+  const to = withTimeout(10000);
+  let res;
+  try {
+    res = await fetch(`${dokployBase}${path}`, {
+      method: "POST",
+      headers: {
+        "x-api-key": DOKPLOY_API_KEY,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body || {}),
+      signal: to.signal,
+    });
+  } finally {
+    to.done();
+  }
+  if (!res.ok) {
+    const err = new Error(`Dokploy API ${res.status} sur ${path}`);
+    err.detail = await res.text().catch(() => "");
+    throw err;
+  }
+  return res.json().catch(() => ({}));
+}
+
+// Extrait owner/repo/branch (+ nom d'app, URL publique et applicationId
+// Dokploy — ce dernier permet le bouton "Relancer" sur /deployments/:id)
+// d'un objet application Dokploy.
 function repoFromApp(a) {
   if (!a) return null;
   const appName = a.name || a.appName || null;
+  const applicationId = a.applicationId || null;
   const firstDomain = Array.isArray(a.domains) && a.domains[0] ? a.domains[0].host : null;
   const url = firstDomain ? `https://${firstDomain}` : null;
   if (a.owner && a.repository) {
-    return { owner: a.owner, repo: a.repository, branch: a.branch || GITHUB_BRANCH, appName, url };
+    return { owner: a.owner, repo: a.repository, branch: a.branch || GITHUB_BRANCH, appName, url, applicationId };
   }
   const parsed = parseGitUrl(a.customGitUrl || a.customGitBuildPath);
-  if (parsed) return { ...parsed, branch: a.customGitBranch || GITHUB_BRANCH, appName, url };
+  if (parsed) return { ...parsed, branch: a.customGitBranch || GITHUB_BRANCH, appName, url, applicationId };
   return null;
 }
 
@@ -466,13 +496,33 @@ function walkAppIds(node, out = new Set()) {
   return out;
 }
 
+// Suivi de panne du poller (ex. clé Dokploy expirée) : jusqu'ici une erreur
+// de project.all ne faisait qu'un warn silencieux, invisible tant qu'on ne
+// lisait pas les logs. Exposé sur /health pour être visible/surveillable.
+let pollFailureStreak = 0;
+let lastPollError = null;
+const POLL_ALERT_THRESHOLD = 5; // ~25s à 5s/tick avant de considérer le poller en panne
+
 async function listAppIds() {
   const ids = new Set(learnedAppIds);
   try {
     const projects = await dokployGet("/api/project.all");
     for (const id of walkAppIds(projects)) ids.add(id);
+    if (pollFailureStreak >= POLL_ALERT_THRESHOLD) {
+      console.log("[poll] project.all de nouveau disponible, reprise normale");
+    }
+    pollFailureStreak = 0;
+    lastPollError = null;
   } catch (err) {
-    console.warn("[poll] project.all indisponible :", err.message);
+    pollFailureStreak += 1;
+    lastPollError = err.message;
+    if (pollFailureStreak === POLL_ALERT_THRESHOLD) {
+      console.error(
+        `[poll] ALERTE : project.all échoue depuis ${POLL_ALERT_THRESHOLD} tentatives consécutives (${err.message}) — vérifie DOKPLOY_API_KEY / DOKPLOY_URL`
+      );
+    } else {
+      console.warn("[poll] project.all indisponible :", err.message);
+    }
   }
   return ids;
 }
@@ -517,7 +567,7 @@ async function pollOnce() {
           mapped.description,
           repo.url,
           dokployBase ? `${dokployBase}/dashboard/projects` : undefined,
-          { appName: repo.appName, branch: repo.branch, environment: "production" }
+          { appName: repo.appName, branch: repo.branch, environment: "production", applicationId: repo.applicationId }
         );
         console.log(
           `[poll] ${repo.owner}/${repo.repo} en cours -> pending (${sha.slice(0, 7)})`
@@ -564,7 +614,7 @@ async function pollOnce() {
           mapped.description,
           repo.url,
           dokployBase ? `${dokployBase}/dashboard/projects` : undefined,
-          { appName: repo.appName, branch: repo.branch, environment: "production" }
+          { appName: repo.appName, branch: repo.branch, environment: "production", applicationId: repo.applicationId }
         );
         console.log(
           `[poll] rattrapage statut final : ${repo.owner}/${repo.repo} ${sha.slice(0, 7)} -> ${mapped.state}`
@@ -611,6 +661,7 @@ async function parsePayload(body = {}) {
       sha: body.sha,
       url: cleanUrl(body.appUrl),
       logUrl: cleanUrl(body.logUrl),
+      applicationId: null,
     };
   }
 
@@ -632,6 +683,7 @@ async function parsePayload(body = {}) {
     sha: undefined,
     url: firstDomain ? `https://${firstDomain}` : undefined,
     logUrl: cleanUrl(body.buildLink),
+    applicationId: repo.applicationId || null,
   };
 }
 
@@ -683,7 +735,7 @@ app.post("/webhook", async (req, res) => {
       mapped.description,
       intent.url,
       intent.logUrl,
-      { appName: intent.appName, branch: intent.branch, environment: "production" }
+      { appName: intent.appName, branch: intent.branch, environment: "production", applicationId: intent.applicationId }
     );
     console.log("[webhook] statuts GitHub mis à jour avec succès");
     return res.json({ ok: true, state: mapped.state });
@@ -793,6 +845,15 @@ function isAuthorizedFor(req, id) {
   return false;
 }
 
+// Pour les nouvelles fonctionnalités (liste, santé de tous les sites,
+// relance) : seul le mot de passe (jeton de session) donne accès, jamais un
+// jeton de lien scopé à un seul déploiement.
+function isSessionAuthorized(req) {
+  const authHeader = req.headers.authorization || "";
+  const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  return !!(bearer && signer.verify(bearer, "session"));
+}
+
 // Données du déploiement, jamais les secrets (token GitHub, clé Dokploy,
 // mot de passe) : le store ne les contient de toute façon pas.
 app.get("/api/deployments/:id", (req, res) => {
@@ -818,7 +879,51 @@ app.get("/deployments/:id", (_req, res) => {
   res.type("html").send(renderDeploymentPage());
 });
 
-app.get("/health", (_req, res) => res.json({ ok: true }));
+// Liste + état de santé de tous les sites : réservé au mot de passe, jamais
+// accessible via un jeton de lien scopé à un seul déploiement.
+app.get("/api/deployments", (req, res) => {
+  if (!isSessionAuthorized(req)) {
+    return res.status(401).json({ error: "Authentification requise" });
+  }
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+  res.json({ deployments: store.list(limit), health: store.latestByRepo() });
+});
+
+app.post("/api/deployments/:id/retry", async (req, res) => {
+  if (!isSessionAuthorized(req)) {
+    return res.status(401).json({ error: "Authentification requise" });
+  }
+  const { id } = req.params;
+  if (!DEPLOYMENT_ID_RE.test(id)) {
+    return res.status(400).json({ error: "Identifiant de déploiement invalide" });
+  }
+  const record = store.get(id);
+  if (!record) return res.status(404).json({ error: "Déploiement introuvable" });
+  if (!record.applicationId) {
+    return res.status(409).json({ error: "applicationId inconnu pour ce déploiement, relance impossible" });
+  }
+  try {
+    await dokployPost("/api/application.deploy", { applicationId: record.applicationId });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[retry] échec relance Dokploy :", err.message, err.detail || "");
+    res.status(502).json({ error: "Échec de la relance Dokploy" });
+  }
+});
+
+// Page HTML de la liste + santé (même principe que /deployments/:id : le
+// rendu et l'authentification se font côté client via /api/deployments).
+app.get("/deployments", (_req, res) => {
+  res.type("html").send(renderAdminPage());
+});
+
+app.get("/health", (_req, res) =>
+  res.json({
+    ok: pollFailureStreak < POLL_ALERT_THRESHOLD,
+    pollFailureStreak,
+    lastPollError,
+  })
+);
 
 // Diagnostic du poller : GET /debug-poll?secret=<WEBHOOK_SECRET>
 app.get("/debug-poll", async (req, res) => {
@@ -863,6 +968,7 @@ app.get("/", (_req, res) => {
         `<ul><li><code>POST /webhook</code> — notification Dokploy</li>` +
         `<li><code>POST /github</code> — webhook GitHub push (statut « en cours »)</li>` +
         `<li><code>GET /deployments/:id</code> — page de détail d'un déploiement</li>` +
+        `<li><code>GET /deployments</code> — liste + état de santé de tous les sites (mot de passe requis)</li>` +
         `<li><code>GET /health</code></li></ul>`
     );
 });

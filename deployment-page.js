@@ -44,6 +44,8 @@ function renderDeploymentPage() {
   .actions{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:.25rem}
   .actions a{display:inline-block;padding:.5rem .9rem;border:1px solid var(--border);border-radius:8px;text-decoration:none;font-size:.85rem}
   .actions a:hover{background:var(--border)}
+  .retry-btn{padding:.5rem .9rem;border:1px solid #dc2626;border-radius:8px;font-size:.85rem;background:none;color:#dc2626;cursor:pointer;font-family:inherit}
+  .retry-btn:disabled{opacity:.6;cursor:default}
   .note{color:var(--muted);font-size:.85rem}
   .center{max-width:380px;margin:4rem auto;text-align:center}
   input[type=password]{width:100%;padding:.65rem .8rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:1rem;margin:.75rem 0}
@@ -54,7 +56,10 @@ function renderDeploymentPage() {
 <div class="wrap">
   <div class="top-nav">
     <a href="/">← Retour</a>
-    <button id="logout" hidden>Se déconnecter</button>
+    <span style="display:flex;gap:.75rem;align-items:center">
+      <a id="admin-link" href="/deployments" hidden>Tous les sites</a>
+      <button id="logout" hidden>Se déconnecter</button>
+    </span>
   </div>
 
   <div id="gate" class="center" hidden>
@@ -187,6 +192,33 @@ function renderDeploymentPage() {
     if (record.appUrl) addAction(actions, "Voir le site", record.appUrl);
     if (record.dokployLogUrl) addAction(actions, "Logs Dokploy", record.dokployLogUrl);
 
+    var canRetry = (record.status === "failure" || record.status === "error") &&
+      !!localStorage.getItem("dgs_session_token");
+    if (canRetry) {
+      var retryBtn = document.createElement("button");
+      retryBtn.type = "button";
+      retryBtn.textContent = "Relancer";
+      retryBtn.className = "retry-btn";
+      retryBtn.addEventListener("click", function () {
+        retryBtn.disabled = true;
+        retryBtn.textContent = "Relance en cours…";
+        fetch("/api/deployments/" + encodeURIComponent(id) + "/retry", {
+          method: "POST",
+          headers: authHeader(),
+        })
+          .then(function (res) { return res.json().then(function (body) { return { ok: res.ok, body: body }; }); })
+          .then(function (r) {
+            retryBtn.disabled = false;
+            retryBtn.textContent = r.ok ? "Relance déclenchée ✓" : (r.body.error || "Échec de la relance");
+          })
+          .catch(function () {
+            retryBtn.disabled = false;
+            retryBtn.textContent = "Erreur réseau, réessaie";
+          });
+      });
+      actions.appendChild(retryBtn);
+    }
+
     var tl = $("#timeline");
     tl.innerHTML = "";
     (record.history || []).forEach(function (h) {
@@ -204,6 +236,7 @@ function renderDeploymentPage() {
     show($("#app"));
     hide($("#loading"));
     $("#logout").hidden = false;
+    if (localStorage.getItem("dgs_session_token")) $("#admin-link").hidden = false;
 
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
     if (meta.poll) pollTimer = setTimeout(load, 5000);

@@ -109,6 +109,7 @@ commit GitHub reçoit sa pastille, cliquable vers sa page de détail.
 | `GITHUB_WEBHOOK_SECRET` | non | Active `POST /github` (webhook push GitHub) pour un statut « en cours » instantané, en plus du sondage automatique |
 | `POLL` | non | `off` pour désactiver le sondage périodique de Dokploy (défaut `on`) |
 | `POLL_INTERVAL_MS` | non | Fréquence du sondage, en ms (défaut `5000`, plancher `2000`) |
+| `CATCHUP_MAX_AGE_MS` | non | Le rattrapage de statuts manqués ne concerne que les déploiements finis il y a moins de X ms (défaut 15 min, plancher 1 min) — évite de reposter tout l'historique récent au redémarrage du service |
 | `PUBLIC_URL` | non | URL publique de **ce service**, sans `/` final — active les pages `/deployments/:id` |
 | `DASHBOARD_PASSWORD` | non | Mot de passe pour ouvrir une page `/deployments/:id` en dehors d'un clic GitHub |
 
@@ -290,3 +291,4 @@ npm start
 | `/deployments/:id` renvoie 404 | Le service a probablement redémarré depuis ce déploiement (historique en mémoire) — normal, pas un bug |
 | Clic GitHub demande un mot de passe | Le lien a été généré avant que `PUBLIC_URL` soit configuré, ou le jeton a expiré (90 j) |
 | Erreur GitHub 401/403 | Régénérer `GITHUB_TOKEN` avec les bonnes permissions |
+| Rafale de nouveaux "Deployments" GitHub juste après un redémarrage | Normal si un déploiement s'est **réellement** terminé il y a moins de `CATCHUP_MAX_AGE_MS` (15 min par défaut) juste avant/pendant le redémarrage — c'est le filet de rattrapage qui fait son travail. Si ça concerne des commits bien plus anciens, vérifier `CATCHUP_MAX_AGE_MS` |

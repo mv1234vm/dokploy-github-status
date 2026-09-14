@@ -390,6 +390,14 @@ const POLL_INTERVAL_MS = Math.max(
   2000,
   Number(process.env.POLL_INTERVAL_MS) || 5000
 );
+// Fenêtre de rattrapage des statuts finaux manqués : ne concerne que les
+// déploiements terminés il y a moins de X minutes (évite la "tempête" au
+// redémarrage du service, où sinon tout l'historique récent de chaque app
+// serait reposté d'un coup — voir pollOnce()).
+const CATCHUP_MAX_AGE_MS = Math.max(
+  60000,
+  Number(process.env.CATCHUP_MAX_AGE_MS) || 15 * 60 * 1000
+);
 const seenDeployments = new Map(); // applicationId -> dernier deploymentId "en cours" traité
 const seenFinal = new Map(); // applicationId -> dernier deploymentId final (done/error) déjà posté
 const appRepoCache = new Map(); // applicationId -> {owner,repo,branch} | null
@@ -505,6 +513,16 @@ async function pollOnce() {
       // sur GitHub) — le rattrapage ne sert que pour les déploiements dont on
       // n'a JAMAIS eu la moindre nouvelle avant qu'ils se terminent.
       if (seenDeployments.get(id) === latest.deploymentId) continue;
+      // Après un redémarrage du service, sa mémoire est vide : sans ce
+      // garde-fou, TOUS les derniers déploiements de TOUTES les apps
+      // paraîtraient "jamais vus" et se feraient reposter d'un coup, même
+      // des commits vieux de plusieurs jours déjà correctement traités
+      // avant le redémarrage. On ne rattrape que ce qui s'est réellement
+      // terminé récemment.
+      const finishedAt = new Date(
+        latest.finishedAt || latest.startedAt || latest.createdAt || 0
+      ).getTime();
+      if (!finishedAt || Date.now() - finishedAt > CATCHUP_MAX_AGE_MS) continue;
       const sha = shaFromDeployment(latest);
       if (!sha) continue; // rien d'exploitable, pas de commit identifiable
       try {

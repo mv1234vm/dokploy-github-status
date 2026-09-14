@@ -1,5 +1,8 @@
 const crypto = require("crypto");
 const express = require("express");
+const store = require("./store");
+const { makeSigner } = require("./auth");
+const { renderDeploymentPage } = require("./deployment-page");
 
 const app = express();
 // On garde le corps brut pour vérifier la signature des webhooks GitHub
@@ -12,6 +15,10 @@ app.use(
   })
 );
 app.disable("x-powered-by");
+// Derrière le reverse-proxy Dokploy (Traefik) : sans ça, req.ip vaut toujours
+// l'IP interne du proxy et le throttle anti brute-force partagerait le même
+// compteur pour tout le monde.
+app.set("trust proxy", true);
 
 const PORT = 3000;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
@@ -25,6 +32,10 @@ const GITHUB_OWNER = process.env.GITHUB_OWNER || "";
 const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 // Optionnel : secret d'un webhook GitHub "push" pour poser le statut "en cours"
 const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || "";
+// Pages /deployments/:id : URL publique de CE service (pour construire les
+// liens qu'on pose sur GitHub) + mot de passe d'accès direct.
+const PUBLIC_URL = (process.env.PUBLIC_URL || "").replace(/\/+$/, "");
+const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || "";
 let APP_MAP = {};
 try {
   APP_MAP = process.env.APP_MAP ? JSON.parse(process.env.APP_MAP) : {};
@@ -45,6 +56,28 @@ if (!DOKPLOY_API_KEY && !GITHUB_OWNER && Object.keys(APP_MAP).length === 0) {
     "[config] Fournis DOKPLOY_API_KEY (recommandé) ou GITHUB_OWNER/APP_MAP. Arrêt."
   );
   process.exit(1);
+}
+if (!PUBLIC_URL) {
+  console.warn(
+    "[config] PUBLIC_URL non défini : les liens GitHub continueront de pointer vers Dokploy, pas vers /deployments/:id."
+  );
+}
+if (PUBLIC_URL && !DASHBOARD_PASSWORD) {
+  console.warn(
+    "[config] DASHBOARD_PASSWORD non défini : /deployments/:id ne sera accessible que via le lien signé posé sur GitHub, jamais en accès direct."
+  );
+}
+
+const signer = makeSigner(WEBHOOK_SECRET);
+
+// Construit l'URL de la page de détail d'un déploiement, avec un jeton signé
+// qui n'autorise QUE ce déploiement (voir auth.js) — c'est ce jeton qui
+// permet au clic "Details"/"View deployment" depuis GitHub de s'ouvrir sans
+// écran de mot de passe, sans pour autant donner accès aux autres déploiements.
+function buildDeploymentUrl(deploymentId) {
+  if (!PUBLIC_URL) return null;
+  const token = signer.sign(`deployment:${deploymentId}`, 60 * 60 * 24 * 90);
+  return `${PUBLIC_URL}/deployments/${deploymentId}?t=${token}`;
 }
 
 const GITHUB_API = "https://api.github.com";
@@ -165,30 +198,65 @@ async function getHeadSha(owner, repo, branch) {
   return data.sha;
 }
 
-// url = URL publique de l'app (environment_url) ; logUrl = page de logs Dokploy ("Details")
-async function setGithubStatus(owner, repo, sha, state, description, url, logUrl) {
-  const details = logUrl || url;
+// GitHub accepte "in_progress" pour un deployment status (pas pour un commit
+// status, qui reste "pending") : plus juste sémantiquement que "pending" tout
+// court pour un déploiement réellement en cours d'exécution.
+function toDeploymentStatusState(state) {
+  if (state === "pending") return "in_progress";
+  return state; // success | failure | error
+}
+
+// url = URL publique de l'app (environment_url, "voir le site") ; logUrl =
+// lien de secours vers les logs Dokploy si /deployments/:id n'est pas
+// configuré (PUBLIC_URL absent) ; meta = infos d'affichage optionnelles
+// (appName, environment) pour la page de détail.
+async function setGithubStatus(owner, repo, sha, state, description, url, logUrl, meta = {}) {
+  // Toujours clore un éventuel pending précédent sur ce repo avant d'agir,
+  // qu'on pose un nouveau pending (commit court-circuité par un push plus
+  // récent) ou un statut final — sinon un pending resterait bloqué si le
+  // déploiement suivant saute directement à "success" sans repasser par nous.
+  await closeStalePending(owner, repo, sha);
 
   const deployment = await githubPost(
     `${GITHUB_API}/repos/${owner}/${repo}/deployments`,
-    { ref: sha, auto_merge: false, required_contexts: [], environment: "dokploy" }
+    { ref: sha, auto_merge: false, required_contexts: [], environment: meta.environment || "dokploy" }
   );
   console.log(`[github] deployment créé : id=${deployment.id}`);
+
+  const deploymentId = String(deployment.id);
+  const ownPageUrl = buildDeploymentUrl(deploymentId);
+  const details = ownPageUrl || logUrl || url;
+
+  if (store.get(deploymentId)) {
+    store.update(deploymentId, state, description);
+  } else {
+    store.create(deploymentId, {
+      owner,
+      repo,
+      sha,
+      branch: meta.branch,
+      appName: meta.appName,
+      environment: meta.environment || "production",
+      appUrl: url || null,
+      dokployLogUrl: logUrl || null,
+      status: state,
+      description,
+    });
+  }
 
   await githubPost(
     `${GITHUB_API}/repos/${owner}/${repo}/deployments/${deployment.id}/statuses`,
     {
-      state,
+      state: toDeploymentStatusState(state),
       description,
       environment_url: url,
       log_url: details,
       auto_inactive: true,
     }
   );
-  console.log(`[github] deployment status : state=${state}`);
+  console.log(`[github] deployment status : state=${toDeploymentStatusState(state)}`);
 
   const commitState = toCommitState(state);
-  if (commitState !== "pending") await closeStalePending(owner, repo, sha);
   await githubPost(`${GITHUB_API}/repos/${owner}/${repo}/statuses/${sha}`, {
     state: commitState,
     description,
@@ -229,19 +297,6 @@ async function closeStalePending(owner, repo, keepSha) {
   }
 }
 
-// Pose uniquement un commit status (utilisé par le webhook GitHub "push" -> en cours)
-async function setPendingStatus(owner, repo, sha, targetUrl) {
-  await closeStalePending(owner, repo, sha);
-  await githubPost(`${GITHUB_API}/repos/${owner}/${repo}/statuses/${sha}`, {
-    state: "pending",
-    description: STATE_MAP.pending.description,
-    context: "Dokploy",
-    target_url: targetUrl,
-  });
-  pendingByRepo.set(`${owner}/${repo}`, sha);
-  console.log(`[github] commit status : state=pending (${owner}/${repo} ${sha.slice(0, 7)})`);
-}
-
 // ---------- Résolution du repo ----------
 
 function parseGitUrl(gitUrl) {
@@ -275,14 +330,18 @@ async function dokployGet(path) {
   return res.json();
 }
 
-// Extrait owner/repo/branch d'un objet application Dokploy
+// Extrait owner/repo/branch (+ nom d'app et URL publique, pour l'affichage
+// sur /deployments/:id) d'un objet application Dokploy
 function repoFromApp(a) {
   if (!a) return null;
+  const appName = a.name || a.appName || null;
+  const firstDomain = Array.isArray(a.domains) && a.domains[0] ? a.domains[0].host : null;
+  const url = firstDomain ? `https://${firstDomain}` : null;
   if (a.owner && a.repository) {
-    return { owner: a.owner, repo: a.repository, branch: a.branch || GITHUB_BRANCH };
+    return { owner: a.owner, repo: a.repository, branch: a.branch || GITHUB_BRANCH, appName, url };
   }
   const parsed = parseGitUrl(a.customGitUrl || a.customGitBuildPath);
-  if (parsed) return { ...parsed, branch: a.customGitBranch || GITHUB_BRANCH };
+  if (parsed) return { ...parsed, branch: a.customGitBranch || GITHUB_BRANCH, appName, url };
   return null;
 }
 
@@ -412,11 +471,16 @@ async function pollOnce() {
       seenDeployments.set(id, latest.deploymentId);
       try {
         const sha = await getHeadSha(repo.owner, repo.repo, repo.branch);
-        await setPendingStatus(
+        const mapped = STATE_MAP.pending;
+        await setGithubStatus(
           repo.owner,
           repo.repo,
           sha,
-          dokployBase ? `${dokployBase}/dashboard/projects` : undefined
+          mapped.state,
+          mapped.description,
+          repo.url,
+          dokployBase ? `${dokployBase}/dashboard/projects` : undefined,
+          { appName: repo.appName, branch: repo.branch, environment: "production" }
         );
         console.log(
           `[poll] ${repo.owner}/${repo.repo} en cours -> pending (${sha.slice(0, 7)})`
@@ -451,8 +515,9 @@ async function pollOnce() {
           sha,
           mapped.state,
           mapped.description,
-          undefined,
-          dokployBase ? `${dokployBase}/dashboard/projects` : undefined
+          repo.url,
+          dokployBase ? `${dokployBase}/dashboard/projects` : undefined,
+          { appName: repo.appName, branch: repo.branch, environment: "production" }
         );
         console.log(
           `[poll] rattrapage statut final : ${repo.owner}/${repo.repo} ${sha.slice(0, 7)} -> ${mapped.state}`
@@ -570,7 +635,8 @@ app.post("/webhook", async (req, res) => {
       mapped.state,
       mapped.description,
       intent.url,
-      intent.logUrl
+      intent.logUrl,
+      { appName: intent.appName, branch: intent.branch, environment: "production" }
     );
     console.log("[webhook] statuts GitHub mis à jour avec succès");
     return res.json({ ok: true, state: mapped.state });
@@ -616,12 +682,93 @@ app.post("/github", async (req, res) => {
 
   console.log(`[github-push] ${owner}/${repo} ${body.after.slice(0, 7)} -> pending`);
   try {
-    await setPendingStatus(owner, repo, body.after, body.compare);
+    const branch = String(body.ref || "").replace(/^refs\/heads\//, "") || undefined;
+    const mapped = STATE_MAP.pending;
+    await setGithubStatus(
+      owner,
+      repo,
+      body.after,
+      mapped.state,
+      mapped.description,
+      undefined,
+      body.compare,
+      { branch, environment: "production" }
+    );
     return res.json({ ok: true, state: "pending" });
   } catch (err) {
     console.error("[github-push] erreur API GitHub :", err.message, JSON.stringify(err.detail || {}));
     return res.status(500).json({ error: "Échec de la mise à jour GitHub" });
   }
+});
+
+// ---------- Pages de détail des déploiements ----------
+
+// Garde-fou anti brute-force sur le mot de passe : 5 essais/minute par IP.
+// Volontairement simple (mémoire, pas de dépendance) — suffisant pour une
+// page à usage interne, pas un endpoint public à fort trafic.
+const loginAttempts = new Map(); // ip -> { count, resetAt }
+function loginThrottled(ip) {
+  const now = Date.now();
+  const entry = loginAttempts.get(ip);
+  if (!entry || now > entry.resetAt) {
+    loginAttempts.set(ip, { count: 1, resetAt: now + 60000 });
+    return false;
+  }
+  entry.count += 1;
+  return entry.count > 5;
+}
+
+app.post("/api/login", (req, res) => {
+  if (!DASHBOARD_PASSWORD) {
+    return res.status(503).json({ error: "Accès par mot de passe non configuré" });
+  }
+  if (loginThrottled(req.ip || "?")) {
+    return res.status(429).json({ error: "Trop de tentatives, réessaie dans une minute." });
+  }
+  const password = req.body && req.body.password;
+  if (typeof password !== "string" || !safeEqual(password, DASHBOARD_PASSWORD)) {
+    return res.status(401).json({ error: "Mot de passe incorrect." });
+  }
+  const token = signer.sign("session", 60 * 60 * 24 * 30); // 30 jours
+  res.json({ token });
+});
+
+const DEPLOYMENT_ID_RE = /^[0-9]+$/;
+
+// Un jeton de session (mot de passe) donne accès à tous les déploiements ;
+// un jeton de lien (posé sur GitHub) ne donne accès qu'au déploiement visé.
+function isAuthorizedFor(req, id) {
+  const authHeader = req.headers.authorization || "";
+  const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (bearer && signer.verify(bearer, "session")) return true;
+  const linkToken = req.query.t || req.headers["x-link-token"];
+  if (linkToken && signer.verify(String(linkToken), `deployment:${id}`)) return true;
+  return false;
+}
+
+// Données du déploiement, jamais les secrets (token GitHub, clé Dokploy,
+// mot de passe) : le store ne les contient de toute façon pas.
+app.get("/api/deployments/:id", (req, res) => {
+  const { id } = req.params;
+  if (!DEPLOYMENT_ID_RE.test(id)) {
+    return res.status(400).json({ error: "Identifiant de déploiement invalide" });
+  }
+  // Auth vérifiée AVANT de regarder si l'id existe : un visiteur non
+  // authentifié reçoit toujours 401, jamais 404, pour ne pas laisser deviner
+  // quels ids existent par simple essai-erreur.
+  if (!isAuthorizedFor(req, id)) {
+    return res.status(401).json({ error: "Authentification requise" });
+  }
+  const record = store.get(id);
+  if (!record) return res.status(404).json({ error: "Déploiement introuvable" });
+  res.json(record);
+});
+
+// Une seule page HTML pour tous les déploiements : le rendu (et
+// l'authentification) se fait côté client via /api/deployments/:id, qui lui
+// applique les vraies vérifications. Servir ce gabarit ne fuite donc rien.
+app.get("/deployments/:id", (_req, res) => {
+  res.type("html").send(renderDeploymentPage());
 });
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -668,6 +815,7 @@ app.get("/", (_req, res) => {
         `<p>Service actif. Il met à jour les statuts de déploiement GitHub à partir des webhooks Dokploy.</p>` +
         `<ul><li><code>POST /webhook</code> — notification Dokploy</li>` +
         `<li><code>POST /github</code> — webhook GitHub push (statut « en cours »)</li>` +
+        `<li><code>GET /deployments/:id</code> — page de détail d'un déploiement</li>` +
         `<li><code>GET /health</code></li></ul>`
     );
 });

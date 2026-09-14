@@ -50,7 +50,6 @@ function renderDeploymentPage() {
   button.primary{width:100%;padding:.7rem;border:none;border-radius:8px;background:#2563eb;color:#fff;font-size:1rem;cursor:pointer}
   button.primary:disabled{opacity:.6;cursor:default}
   .error-msg{color:#dc2626;font-size:.85rem;min-height:1.2em;margin-top:.4rem}
-  #app{display:none}
 </style>
 <div class="wrap">
   <div class="top-nav">
@@ -73,7 +72,7 @@ function renderDeploymentPage() {
 
   <div id="loading" class="center" hidden><p class="note">Chargement…</p></div>
 
-  <div id="app">
+  <div id="app" hidden>
     <div id="status-banner" class="status-banner">
       <span id="status-emoji" class="status-emoji"></span>
       <div>

@@ -217,13 +217,27 @@ async function setGithubStatus(owner, repo, sha, state, description, url, logUrl
   // déploiement suivant saute directement à "success" sans repasser par nous.
   await closeStalePending(owner, repo, sha);
 
-  const deployment = await githubPost(
-    `${GITHUB_API}/repos/${owner}/${repo}/deployments`,
-    { ref: sha, auto_merge: false, required_contexts: [], environment: meta.environment || "dokploy" }
-  );
-  console.log(`[github] deployment créé : id=${deployment.id}`);
+  const key = `${owner}/${repo}`;
+  const open = pendingByRepo.get(key);
+  let deploymentId;
+  if (open && open.sha === sha) {
+    // Même sha que le pending encore ouvert sur ce repo : c'est la suite du
+    // MÊME cycle de déploiement (le poller a vu "running" pour ce commit,
+    // on ferme maintenant ce même déploiement en "success"/"failure").
+    // Réutiliser l'id plutôt qu'en créer un nouveau évite d'avoir, pour un
+    // seul déploiement réel, deux objets GitHub Deployment distincts — l'un
+    // resterait "in_progress" pour toujours, l'autre n'aurait pas de vraie
+    // date de début sur /deployments/:id.
+    deploymentId = open.deploymentId;
+  } else {
+    const deployment = await githubPost(
+      `${GITHUB_API}/repos/${owner}/${repo}/deployments`,
+      { ref: sha, auto_merge: false, required_contexts: [], environment: meta.environment || "dokploy" }
+    );
+    deploymentId = String(deployment.id);
+    console.log(`[github] deployment créé : id=${deploymentId}`);
+  }
 
-  const deploymentId = String(deployment.id);
   const ownPageUrl = buildDeploymentUrl(deploymentId);
   const details = ownPageUrl || logUrl || url;
 
@@ -245,7 +259,7 @@ async function setGithubStatus(owner, repo, sha, state, description, url, logUrl
   }
 
   await githubPost(
-    `${GITHUB_API}/repos/${owner}/${repo}/deployments/${deployment.id}/statuses`,
+    `${GITHUB_API}/repos/${owner}/${repo}/deployments/${deploymentId}/statuses`,
     {
       state: toDeploymentStatusState(state),
       description,
@@ -263,38 +277,53 @@ async function setGithubStatus(owner, repo, sha, state, description, url, logUrl
     context: "Dokploy",
     target_url: details,
   });
-  if (commitState === "pending") pendingByRepo.set(`${owner}/${repo}`, sha);
-  else if (pendingByRepo.get(`${owner}/${repo}`) === sha) pendingByRepo.delete(`${owner}/${repo}`);
+  if (commitState === "pending") pendingByRepo.set(key, { sha, deploymentId });
+  else if (open && open.deploymentId === deploymentId) pendingByRepo.delete(key);
   console.log(`[github] commit status : state=${commitState}`);
 }
 
 // Bug 1 (pending qui ne se referment jamais) : Dokploy ne déploie que le
 // dernier commit poussé sur la branche. Si un commit B arrive pendant que le
 // pending de A tourne encore, A est court-circuité et son rond orange ne
-// bougera plus jamais tout seul. On mémorise donc, par repo, le dernier sha
-// mis en pending par ce service ; dès qu'un sha différent doit passer en
-// pending (ou que le déploiement se termine), on referme l'ancien.
-const pendingByRepo = new Map(); // "owner/repo" -> sha actuellement en pending posé par nous
+// bougera plus jamais tout seul. On mémorise donc, par repo, le dernier
+// pending posé par ce service (sha + id du GitHub Deployment associé) ; dès
+// qu'un sha différent doit passer en pending (ou que le déploiement se
+// termine), on referme l'ancien — commit status ET deployment status, pour
+// ne pas laisser un objet Deployment bloqué "in_progress" sur GitHub.
+const pendingByRepo = new Map(); // "owner/repo" -> { sha, deploymentId }
 
 async function closeStalePending(owner, repo, keepSha) {
   const key = `${owner}/${repo}`;
-  const staleSha = pendingByRepo.get(key);
-  if (!staleSha || staleSha === keepSha) return;
+  const stale = pendingByRepo.get(key);
+  if (!stale || stale.sha === keepSha) return;
+  const label = "Remplacé par un déploiement plus récent";
   try {
-    await githubPost(`${GITHUB_API}/repos/${owner}/${repo}/statuses/${staleSha}`, {
+    await githubPost(`${GITHUB_API}/repos/${owner}/${repo}/statuses/${stale.sha}`, {
       state: "success",
-      description: "Remplacé par un déploiement plus récent",
+      description: label,
       context: "Dokploy",
     });
     console.log(
-      `[github] pending clos (court-circuité) : ${owner}/${repo} ${staleSha.slice(0, 7)}`
+      `[github] pending clos (court-circuité) : ${owner}/${repo} ${stale.sha.slice(0, 7)}`
     );
   } catch (err) {
     // Le sha a pu disparaître (force-push, branche supprimée) : pas bloquant.
     console.warn(
-      `[github] impossible de clore l'ancien pending ${staleSha.slice(0, 7)} : ${err.message}`
+      `[github] impossible de clore le commit status pending ${stale.sha.slice(0, 7)} : ${err.message}`
     );
   }
+  try {
+    await githubPost(
+      `${GITHUB_API}/repos/${owner}/${repo}/deployments/${stale.deploymentId}/statuses`,
+      { state: "inactive", description: label }
+    );
+  } catch (err) {
+    console.warn(
+      `[github] impossible de clore le deployment status pending id=${stale.deploymentId} : ${err.message}`
+    );
+  }
+  if (store.get(stale.deploymentId)) store.update(stale.deploymentId, "success", label);
+  pendingByRepo.delete(key);
 }
 
 // ---------- Résolution du repo ----------

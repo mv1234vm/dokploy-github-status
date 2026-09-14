@@ -13,6 +13,8 @@ const MAX_RECORDS = 200;
 const records = new Map(); // id (string) -> record
 const insertionOrder = []; // ids dans l'ordre de création, pour purger les plus anciens
 
+const FINAL_STATUSES = new Set(["success", "failure", "error"]);
+
 function create(id, fields) {
   const now = new Date().toISOString();
   const record = {
@@ -29,7 +31,11 @@ function create(id, fields) {
     description: fields.description,
     createdAt: now,
     updatedAt: now,
-    finishedAt: null,
+    // Un déploiement peut arriver directement "success"/"failure" sans être
+    // passé par "pending" côté service (rattrapage, webhook only sans
+    // poller...) : sans ce cas, finishedAt restait à null pour toujours et
+    // la durée affichée grossissait indéfiniment sur la page.
+    finishedAt: FINAL_STATUSES.has(fields.status) ? now : null,
     history: [{ status: fields.status, description: fields.description, at: now }],
   };
   records.set(id, record);
@@ -40,8 +46,6 @@ function create(id, fields) {
   }
   return record;
 }
-
-const FINAL_STATUSES = new Set(["success", "failure", "error"]);
 
 function update(id, status, description) {
   const record = records.get(id);

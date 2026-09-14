@@ -1,83 +1,246 @@
 # dokploy-github-status
 
-Petit serveur Express qui reçoit la **notification Webhook de Dokploy** et met à jour
-les statuts sur GitHub (**deployment statuses** + **commit statuses**), pour reproduire
-le comportement de Vercel : une pastille verte/rouge sur chaque commit déployé.
+Petit service Express, sans base de données, qui relie **Dokploy** et
+**GitHub** : à chaque déploiement, il pose sur le commit correspondant la
+pastille ✅/🔵/❌ que GitHub affiche nativement pour Vercel/Netlify, avec en
+plus une **page de détail dédiée** pour chaque déploiement.
 
-Une seule config, puis c'est automatique pour **toutes** les apps Dokploy dont le nom
-correspond au nom du repo GitHub.
+Zéro dépendance en dehors d'Express, zéro configuration par app une fois le
+service en place — il découvre lui-même le repo GitHub de chaque application
+Dokploy.
+
+```
+   git push
+      │
+      ▼                     "je déploie" / "c'est fini"
+┌──────────┐   déploie   ┌──────────────────┐   webhook / poll   ┌────────────────────────┐
+│  GitHub  │ ──────────► │      Dokploy     │ ──────────────────►│ dokploy-github-status  │
+└──────────┘             └──────────────────┘                    │  (ce service)          │
+      ▲                                                          └───────────┬────────────┘
+      │ pose la pastille + un lien "Details"                                 │
+      └───────────────────────────────────────────────────────────────────────┘
+                              GET /deployments/:id  ← ce que "Details" ouvre
+```
+
+---
+
+## Sommaire
+
+- [Ce que fait le service](#ce-que-fait-le-service)
+- [Mise en place (checklist)](#mise-en-place-checklist)
+- [Variables d'environnement](#variables-denvironnement)
+- [Routes](#routes)
+- [Comment ça marche en détail](#comment-ça-marche-en-détail)
+- [Statut « en cours »](#statut--en-cours-)
+- [Pages de déploiement `/deployments/:id`](#pages-de-déploiement-deploymentsid)
+- [Fiabilité (pending bloqués, statuts manquants)](#fiabilité-pending-bloqués-statuts-manquants)
+- [Sécurité](#sécurité)
+- [Format manuel / test](#format-manuel--test)
+- [Structure du projet](#structure-du-projet)
+- [Développement local](#développement-local)
+- [Dépannage](#dépannage)
+
+---
+
+## Ce que fait le service
+
+1. **Détecte** qu'une app Dokploy commence, réussit ou échoue un déploiement
+   (webhook Dokploy + sondage périodique de l'API Dokploy, en filet de
+   sécurité).
+2. **Retrouve** tout seul à quel repo/branche/commit GitHub ça correspond.
+3. **Pose le statut** sur GitHub :
+   - un **commit status** (`context: "Dokploy"`) → la pastille à côté du
+     commit et dans les checks d'une PR ;
+   - un vrai **GitHub Deployment** → visible dans l'onglet *Environments*/
+     *Deployments* du repo.
+4. Le lien **Details** de ce statut ouvre une **page dédiée** générée par ce
+   service (`/deployments/:id`), pas juste les logs bruts de Dokploy.
+
+Tout ça sans jamais exposer le token GitHub, la clé API Dokploy ou un mot de
+passe au navigateur.
+
+## Mise en place (checklist)
+
+### 1. Déployer ce service sur Dokploy
+- **Create Application** → Git → ce repo → build **Dockerfile**
+- **Domains** : générer un domaine, port `3000`, HTTPS activé
+
+### 2. Générer le token GitHub
+Fine-grained PAT avec, sur les repos concernés : **Contents = Read**,
+**Deployments = Read/Write**, **Commit statuses = Read/Write**.
+
+### 3. Générer la clé API Dokploy
+Dokploy → **Settings → Profile** → section *API/CLI* → *Generate* (laisse le
+rate limiting vide) → copie la clé immédiatement, elle ne se réaffiche pas.
+
+### 4. Renseigner l'Environment du service
+```
+GITHUB_TOKEN=github_pat_xxx
+WEBHOOK_SECRET=<openssl rand -hex 24>
+DOKPLOY_API_KEY=<clé de l'étape 3>
+DOKPLOY_URL=https://ton-dokploy
+PUBLIC_URL=https://<domaine de ce service>
+DASHBOARD_PASSWORD=<openssl rand -hex 16>
+```
+→ **Redeploy**.
+
+### 5. Créer la notification Webhook Dokploy (une seule fois, globale)
+Dokploy → **Notifications** → **Add** → **Webhook**
+- URL : `https://<ton-domaine>/webhook`
+- Header : `x-webhook-secret: <WEBHOOK_SECRET>`
+- Événements : **App Deployed** + **Build failed**
+- **Create**
+
+### 6. C'est fini
+Aucune configuration par app. Déploie n'importe quelle app Dokploy → le bon
+commit GitHub reçoit sa pastille, cliquable vers sa page de détail.
 
 ## Variables d'environnement
 
-| Variable          | Requis | Description                                                                    |
-| ----------------- | ------ | ---------------------------------------------------------------------------- |
-| `GITHUB_TOKEN`    | oui    | PAT fine-grained : **Contents=Read**, **Deployments=R/W**, **Commit statuses=R/W** |
-| `WEBHOOK_SECRET`  | oui    | Secret partagé (≥ 16 car.), envoyé par Dokploy dans le header `x-webhook-secret` |
-| `DOKPLOY_API_KEY` | oui\*  | Clé API Dokploy (Settings → API/Swagger). Le service retrouve seul le repo de chaque app. |
-| `DOKPLOY_URL`     | non    | URL Dokploy si la déduction auto échoue                                      |
-| `GITHUB_BRANCH`   | non    | Branche par défaut (défaut `main`)                                           |
-| `GITHUB_OWNER`    | non    | Fallback si pas d'API Dokploy : `owner`, repo = nom de l'app                 |
-| `APP_MAP`         | non    | Fallback : `{"nom-app":"owner/repo"}` ou `{"nom-app":"owner/repo@branche"}`  |
-| `PUBLIC_URL`      | non    | URL publique de ce service (sans `/` final) — active les pages `/deployments/:id` |
-| `DASHBOARD_PASSWORD` | non | Mot de passe pour ouvrir `/deployments/:id` en dehors d'un clic GitHub       |
+| Variable | Requis | Description |
+| --- | --- | --- |
+| `GITHUB_TOKEN` | **oui** | PAT fine-grained : Contents=Read, Deployments=R/W, Commit statuses=R/W |
+| `WEBHOOK_SECRET` | **oui** | Secret partagé (≥ 16 car.), attendu dans le header `x-webhook-secret` de la notification Dokploy. Sert aussi de clé pour signer les jetons des pages `/deployments/:id`. |
+| `DOKPLOY_API_KEY` | oui\* | Clé API Dokploy — permet de retrouver seul le repo GitHub de chaque app |
+| `DOKPLOY_URL` | non | URL du Dokploy, ex. `https://vps.exemple.fr` — sinon déduite automatiquement de la 1ʳᵉ notification reçue |
+| `GITHUB_BRANCH` | non | Branche par défaut si Dokploy n'en précise pas (défaut `main`) |
+| `GITHUB_OWNER` | non | Fallback si pas d'`DOKPLOY_API_KEY` : compte GitHub, repo = nom de l'app Dokploy |
+| `APP_MAP` | non | Fallback JSON pour les exceptions : `{"nom-app":"owner/repo"}` ou `{"nom-app":"owner/repo@branche"}` |
+| `GITHUB_WEBHOOK_SECRET` | non | Active `POST /github` (webhook push GitHub) pour un statut « en cours » instantané, en plus du sondage automatique |
+| `POLL` | non | `off` pour désactiver le sondage périodique de Dokploy (défaut `on`) |
+| `POLL_INTERVAL_MS` | non | Fréquence du sondage, en ms (défaut `5000`, plancher `2000`) |
+| `PUBLIC_URL` | non | URL publique de **ce service**, sans `/` final — active les pages `/deployments/:id` |
+| `DASHBOARD_PASSWORD` | non | Mot de passe pour ouvrir une page `/deployments/:id` en dehors d'un clic GitHub |
 
-\* `DOKPLOY_API_KEY` **ou** `GITHUB_OWNER`/`APP_MAP`.
+\* Il faut `DOKPLOY_API_KEY` **ou** `GITHUB_OWNER`/`APP_MAP` (au moins un des
+deux).
 
-## Mise en place (une fois, ~3 min)
+## Routes
 
-### 1. Déployer ce service sur Dokploy
-- Create Application → Git → ce repo → build **Dockerfile**
-- Environment : `GITHUB_TOKEN`, `WEBHOOK_SECRET`, `DOKPLOY_API_KEY`
-- Domains : générer un domaine, port `3000`, HTTPS
+| Route | Rôle |
+| --- | --- |
+| `POST /webhook` | Notification Dokploy (fin de déploiement) |
+| `POST /github` | Webhook GitHub *push* optionnel, pour le statut « en cours » instantané |
+| `GET /deployments/:id` | Page de détail d'un déploiement (HTML) |
+| `GET /api/deployments/:id` | Données JSON d'un déploiement, protégées par jeton |
+| `POST /api/login` | Échange un mot de passe contre un jeton de session |
+| `GET /health` | Vérification de disponibilité |
+| `GET /` | Page d'accueil du service |
 
-### 2. Générer la clé API Dokploy
-Dokploy → **Settings → API/Swagger** → *Generate API Key* → colle-la dans `DOKPLOY_API_KEY`.
+## Comment ça marche en détail
 
-### 3. Créer la notification Webhook Dokploy
-Dokploy → **Notifications** → **Add** → **Webhook**
-- URL : `https://<ton-domaine>/webhook`
-- Custom headers :
-  ```
-  x-webhook-secret: <la valeur de WEBHOOK_SECRET>
-  ```
-- Événements : **App Deployed** + **Build failed**
-- Create (globale : couvre toutes les apps, présentes et futures)
+Dokploy n'envoie ni le repo GitHub ni le SHA dans sa notification — seulement
+le nom de l'app et un lien vers son tableau de bord. Le service :
 
-### 4. C'est fini
-Aucune config par app. À chaque déploiement, le bon commit GitHub reçoit son statut.
+1. extrait l'`applicationId` de ce lien et interroge l'API Dokploy pour
+   obtenir `owner`/`repo`/`branch` (avec repli sur `APP_MAP` puis
+   `GITHUB_OWNER` + nom de l'app) ;
+2. récupère le dernier commit de la branche via l'API GitHub (ou le commit
+   exact enregistré par Dokploy, quand disponible, pour un rattrapage a
+   posteriori) ;
+3. crée un **GitHub Deployment**, enregistre une fiche locale sous son id,
+   puis pose le **deployment status** et le **commit status**
+   (`context: "Dokploy"`), avec `target_url`/`log_url` pointant vers
+   `/deployments/<id>`.
 
-## Comment ça marche
+## Statut « en cours »
 
-Dokploy n'envoie ni le repo ni le SHA, mais la notification contient un lien vers l'app.
-Le service :
-1. extrait l'`applicationId` du lien, interroge l'API Dokploy → `owner`/`repo`/`branch`
-   (fallback : `APP_MAP` puis `GITHUB_OWNER/appName`)
-2. récupère le dernier commit de la branche via l'API GitHub
-3. pose un deployment status + un commit status (`context: "Dokploy"`)
+Dokploy ne notifie **qu'à la fin** d'un déploiement — sans rien de plus, la
+pastille passerait directement de rien à ✅/❌. Deux mécanismes, cumulables :
 
-Le lien **Details** sur GitHub pointe vers la page de logs du déploiement Dokploy.
+### Sondage automatique (actif par défaut)
+Le service interroge l'API Dokploy toutes les `POLL_INTERVAL_MS` (5 s par
+défaut). Dès qu'un déploiement passe à `running`, il pose le statut
+`pending`/`in_progress` sur le commit correspondant. Aucune configuration par
+repo. Désactiver : `POLL=off`.
 
-## Statut « en cours » (pastille jaune)
-
-Dokploy ne notifie qu'à la fin. Deux façons d'avoir le jaune :
-
-### Option auto (recommandée, zéro config par repo)
-Ajoute `DOKPLOY_URL=https://ton-dokploy` dans l'Environment du service → Redeploy.
-Le service interroge l'API Dokploy toutes les 5 s ; dès qu'un déploiement est
-`running`, il pose le statut `pending` sur le commit. Rien d'autre à faire.
-Désactiver : `POLL=off`.
-
-### Option webhook GitHub push
-1. Secret (`openssl rand -hex 16`) dans `GITHUB_WEBHOOK_SECRET` → Redeploy.
-2. GitHub → repo/organisation → Settings → **Webhooks** → Add webhook :
+### Webhook GitHub push (optionnel, plus instantané)
+1. Génère un secret, mets-le dans `GITHUB_WEBHOOK_SECRET` → Redeploy.
+2. GitHub → repo ou organisation → **Settings → Webhooks → Add webhook** :
    - Payload URL : `https://<ton-domaine>/github`
    - Content type : `application/json`
    - Secret : le même
    - Events : *Just the push event*
 
-## Format manuel (optionnel)
+## Pages de déploiement `/deployments/:id`
 
-Le endpoint accepte aussi un appel explicite, utile pour tester ou scripter :
+Chaque déploiement a sa propre page, à l'identifiant GitHub réel (le même
+`id` que `/repos/:owner/:repo/deployments/:id`) — jamais une page générique
+qui mélangerait plusieurs déploiements.
+
+**Contenu de la page** : statut coloré (🔵 en cours / 🟢 réussi / 🔴 échoué),
+projet, branche, commit, environnement, dates de lancement/fin, durée,
+timeline des changements d'état, liens vers GitHub/le commit/le site
+déployé/les logs Dokploy. Rafraîchissement automatique toutes les 5 s tant
+que le déploiement est en cours, arrêté dès qu'il se termine.
+
+**Accès depuis GitHub — sans mot de passe.** Le lien *Details* posé sur
+GitHub est de la forme `https://<PUBLIC_URL>/deployments/<id>?t=<jeton>`. Ce
+jeton est signé (HMAC-SHA256, valable 90 jours) et **scopé à ce seul
+déploiement** : il ouvre directement la page correspondante, mais un jeton
+volé ou partagé ne donne accès à aucun autre déploiement — vérifié
+explicitement côté serveur à chaque requête.
+
+**Accès direct — avec mot de passe.** Ouvrir `/deployments/123` sans ce
+jeton (URL copiée, favori, etc.) affiche un écran de mot de passe
+(`DASHBOARD_PASSWORD`, 5 tentatives/minute/IP). Une fois validé, un jeton de
+**session** (30 jours, distinct du jeton de lien, donnant accès à *tous* les
+déploiements) est stocké dans `localStorage` — jamais le mot de passe
+lui-même. Bouton **Se déconnecter** pour l'effacer et revenir à l'écran de
+mot de passe au prochain accès direct.
+
+**Ce que le navigateur ne reçoit jamais** : `GITHUB_TOKEN`, `DOKPLOY_API_KEY`,
+`DASHBOARD_PASSWORD`, ni les données d'un autre déploiement que celui
+demandé et autorisé.
+
+**Limite assumée** : l'historique est **en mémoire** (200 déploiements les
+plus récents, quelques centaines de Ko — négligeable). Un redémarrage du
+service (redéploiement de lui-même, par exemple) repart de zéro ; les
+anciennes pages renvoient alors un 404 propre plutôt que d'inventer des
+données. Sans `PUBLIC_URL` configuré, cette fonctionnalité est simplement
+inactive et les liens *Details* pointent vers les logs Dokploy comme avant.
+
+## Fiabilité (pending bloqués, statuts manquants)
+
+- **Pending qui ne se referme jamais** : si un commit B est poussé pendant
+  que le déploiement de A tourne encore, Dokploy ne construit que B — A
+  resterait bloqué en 🔵 pour toujours. Le service mémorise le dernier commit
+  mis en `pending` par repo et referme automatiquement l'ancien
+  (`state: success`, *« Remplacé par un déploiement plus récent »*) dès
+  qu'un nouveau lui succède.
+- **Statuts jamais posés** (webhook manqué) : les appels à l'API GitHub sont
+  réessayés (2 tentatives, backoff) sur erreur réseau/5xx. En complément, le
+  sondage périodique sert de filet de rattrapage : un déploiement vu passer
+  directement à `done`/`error` sans jamais être passé par `running` via ce
+  service se voit poser son statut final a posteriori (idempotent, pas de
+  doublon si le webhook a bien fonctionné).
+
+## Sécurité
+
+- `x-webhook-secret` et signature `x-hub-signature-256` comparés en temps
+  constant (`crypto.timingSafeEqual`).
+- Mot de passe (`DASHBOARD_PASSWORD`) jamais renvoyé au client, jamais
+  stocké en clair côté navigateur ; comparaison en temps constant ;
+  throttle anti brute-force (5 tentatives/minute/IP).
+- `/api/deployments/:id` vérifie l'authentification **avant** de regarder si
+  l'id existe : impossible d'énumérer les ids valides sans être authentifié.
+- Jetons de lien scopés à un seul `id`, jetons de session distincts —
+  jamais interchangeables.
+- Le service refuse de démarrer sans `GITHUB_TOKEN`/`WEBHOOK_SECRET` (ou
+  secret < 16 caractères), ou sans un moyen de résoudre les repos
+  (`DOKPLOY_API_KEY`/`GITHUB_OWNER`/`APP_MAP`).
+- `owner`/`repo`/`branch`/URL/identifiants de déploiement validés par regex ;
+  corps JSON ≤ 1 Mo ; timeout 10 s sur tous les appels sortants ;
+  `x-powered-by` désactivé.
+- Les erreurs GitHub/Dokploy sont loggées côté serveur uniquement, jamais
+  renvoyées au client (réponses génériques).
+- `npm audit` : 0 vulnérabilité (Express 5, aucune autre dépendance).
+- À exposer uniquement en HTTPS ; garder tous les secrets hors du dépôt
+  (`.env`, jamais commité).
+
+## Format manuel / test
+
+Le endpoint `/webhook` accepte aussi un appel explicite, utile pour tester :
 
 ```bash
 curl -X POST https://<ton-domaine>/webhook \
@@ -93,47 +256,37 @@ curl -X POST https://<ton-domaine>/webhook \
   }'
 ```
 
-`status` : `running`/`pending` → pending, `done`/`success` → success,
-`failed`/`failure` → failure, `error` → error.
+`status` accepté : `running`/`pending` → en cours, `done`/`success` →
+réussi, `failed`/`failure` → échoué, `error` → erreur.
 
-## Pages de déploiement (`/deployments/:id`)
+## Structure du projet
 
-Chaque fois que le service pose un statut GitHub, il crée un vrai **GitHub
-Deployment** (comme avant) et enregistre une fiche locale sous le même `id`.
-Le lien **Details** posé sur GitHub pointe désormais vers
-`https://<PUBLIC_URL>/deployments/<id>?t=<jeton>` :
-
-- Le **jeton dans l'URL** n'autorise QUE ce déploiement précis (signé HMAC,
-  90 jours) — cliquer depuis GitHub ouvre la page sans mot de passe, mais ce
-  lien ne donne jamais accès aux autres déploiements.
-- Un accès **direct** à `/deployments/123` sans ce jeton demande
-  `DASHBOARD_PASSWORD` ; une fois entré, un jeton de session (30 jours,
-  distinct du jeton de lien) est gardé dans `localStorage` — jamais le mot de
-  passe lui-même. Bouton **Se déconnecter** pour l'effacer.
-- L'historique est **en mémoire** (jusqu'à 200 déploiements les plus
-  récents, quelques centaines de Ko au total — négligeable) : pas de base de
-  données, un redémarrage du
-  service repart de zéro et les anciennes pages renvoient un 404 propre.
-- La page (statut, timeline, actions) est rendue côté client en interrogeant
-  `GET /api/deployments/:id`, qui vérifie l'authentification **avant** de
-  regarder si l'id existe (jamais d'énumération d'ids), et ne renvoie que les
-  champs du déploiement — jamais `GITHUB_TOKEN`, `DOKPLOY_API_KEY` ni
-  `DASHBOARD_PASSWORD`.
-- Sans `PUBLIC_URL`, cette fonctionnalité est simplement inactive : les liens
-  continuent de pointer vers Dokploy comme avant (comportement inchangé).
-
-## Sécurité
-
-- Header `x-webhook-secret` comparé en temps constant (`crypto.timingSafeEqual`).
-- Refuse de démarrer sans `GITHUB_TOKEN`/`WEBHOOK_SECRET` (ou secret < 16 car.), ou sans `DOKPLOY_API_KEY`/`GITHUB_OWNER`/`APP_MAP`.
-- `owner`/`repo`/`branch`/URL validés ; body JSON ≤ 1 Mo ; timeout 10 s sur les appels sortants ; `x-powered-by` off.
-- Les erreurs GitHub sont loggées côté serveur, jamais renvoyées au client (500 générique).
-- `npm audit` : 0 vulnérabilité (Express 5, aucune autre dépendance).
-- À exposer uniquement en HTTPS ; garder `WEBHOOK_SECRET` et `GITHUB_TOKEN` hors du dépôt.
+```
+index.js             serveur Express, routes, poller Dokploy, logique GitHub
+store.js             historique en mémoire des déploiements (par id GitHub)
+auth.js              jetons de session/lien signés (HMAC), sans état serveur
+deployment-page.js   page HTML de /deployments/:id (rendu + auth côté client)
+Dockerfile           image de déploiement (node:20-alpine)
+```
 
 ## Développement local
 
 ```bash
 npm install
-GITHUB_TOKEN=xxx WEBHOOK_SECRET=0123456789abcdef GITHUB_OWNER=mv1234vm npm start
+GITHUB_TOKEN=xxx \
+WEBHOOK_SECRET=0123456789abcdef0123 \
+GITHUB_OWNER=mv1234vm \
+PUBLIC_URL=http://localhost:3000 \
+DASHBOARD_PASSWORD=devpassword \
+npm start
 ```
+
+## Dépannage
+
+| Symptôme | Piste |
+| --- | --- |
+| Aucune pastille sur GitHub | Vérifier les logs du service (`[webhook]`), la notification Dokploy, et que `GITHUB_TOKEN` a bien les permissions Deployments + Commit statuses |
+| Pas de pastille 🔵 « en cours » | `DOKPLOY_URL` renseigné ? `POLL` pas à `off` ? Regarder les logs `[poll]` |
+| `/deployments/:id` renvoie 404 | Le service a probablement redémarré depuis ce déploiement (historique en mémoire) — normal, pas un bug |
+| Clic GitHub demande un mot de passe | Le lien a été généré avant que `PUBLIC_URL` soit configuré, ou le jeton a expiré (90 j) |
+| Erreur GitHub 401/403 | Régénérer `GITHUB_TOKEN` avec les bonnes permissions |

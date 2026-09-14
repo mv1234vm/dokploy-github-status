@@ -5,7 +5,10 @@
 // affichera un 404 propre sur sa page /deployments/:id plutôt que des
 // données inventées — c'est le compromis assumé plutôt que d'ajouter une
 // dépendance base de données pour ce besoin.
-const MAX_RECORDS = 500;
+// Chaque fiche pèse ~0.5 à 1 Ko (quelques champs texte + un historique de
+// 3-6 entrées). 200 fiches max = quelques centaines de Ko en mémoire dans le
+// pire cas, négligeable pour un petit service Node.
+const MAX_RECORDS = 200;
 
 const records = new Map(); // id (string) -> record
 const insertionOrder = []; // ids dans l'ordre de création, pour purger les plus anciens

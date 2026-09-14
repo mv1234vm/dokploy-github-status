@@ -18,6 +18,8 @@ correspond au nom du repo GitHub.
 | `GITHUB_BRANCH`   | non    | Branche par défaut (défaut `main`)                                           |
 | `GITHUB_OWNER`    | non    | Fallback si pas d'API Dokploy : `owner`, repo = nom de l'app                 |
 | `APP_MAP`         | non    | Fallback : `{"nom-app":"owner/repo"}` ou `{"nom-app":"owner/repo@branche"}`  |
+| `PUBLIC_URL`      | non    | URL publique de ce service (sans `/` final) — active les pages `/deployments/:id` |
+| `DASHBOARD_PASSWORD` | non | Mot de passe pour ouvrir `/deployments/:id` en dehors d'un clic GitHub       |
 
 \* `DOKPLOY_API_KEY` **ou** `GITHUB_OWNER`/`APP_MAP`.
 
@@ -93,6 +95,32 @@ curl -X POST https://<ton-domaine>/webhook \
 
 `status` : `running`/`pending` → pending, `done`/`success` → success,
 `failed`/`failure` → failure, `error` → error.
+
+## Pages de déploiement (`/deployments/:id`)
+
+Chaque fois que le service pose un statut GitHub, il crée un vrai **GitHub
+Deployment** (comme avant) et enregistre une fiche locale sous le même `id`.
+Le lien **Details** posé sur GitHub pointe désormais vers
+`https://<PUBLIC_URL>/deployments/<id>?t=<jeton>` :
+
+- Le **jeton dans l'URL** n'autorise QUE ce déploiement précis (signé HMAC,
+  90 jours) — cliquer depuis GitHub ouvre la page sans mot de passe, mais ce
+  lien ne donne jamais accès aux autres déploiements.
+- Un accès **direct** à `/deployments/123` sans ce jeton demande
+  `DASHBOARD_PASSWORD` ; une fois entré, un jeton de session (30 jours,
+  distinct du jeton de lien) est gardé dans `localStorage` — jamais le mot de
+  passe lui-même. Bouton **Se déconnecter** pour l'effacer.
+- L'historique est **en mémoire** (jusqu'à 200 déploiements les plus
+  récents, quelques centaines de Ko au total — négligeable) : pas de base de
+  données, un redémarrage du
+  service repart de zéro et les anciennes pages renvoient un 404 propre.
+- La page (statut, timeline, actions) est rendue côté client en interrogeant
+  `GET /api/deployments/:id`, qui vérifie l'authentification **avant** de
+  regarder si l'id existe (jamais d'énumération d'ids), et ne renvoie que les
+  champs du déploiement — jamais `GITHUB_TOKEN`, `DOKPLOY_API_KEY` ni
+  `DASHBOARD_PASSWORD`.
+- Sans `PUBLIC_URL`, cette fonctionnalité est simplement inactive : les liens
+  continuent de pointer vers Dokploy comme avant (comportement inchangé).
 
 ## Sécurité
 

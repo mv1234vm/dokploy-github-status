@@ -30,7 +30,7 @@ function renderAdminPage() {
   .note{color:var(--muted);font-size:.85rem}
   .center{max-width:380px;margin:4rem auto;text-align:center}
   input[type=password]{width:100%;padding:.65rem .8rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:1rem;margin:.75rem 0}
-  button.primary{width:100%;padding:.7rem;border:none;border-radius:8px;background:#2563eb;color:#fff;font-size:1rem;cursor:pointer}
+  button.primary{width:100%;padding:.7rem;border:none;border-radius:8px;background:#ea580c;color:#fff;font-size:1rem;cursor:pointer}
   button.primary:disabled{opacity:.6;cursor:default}
   .error-msg{color:#dc2626;font-size:.85rem;min-height:1.2em;margin-top:.4rem}
 </style>

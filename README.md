@@ -2,7 +2,7 @@
 
 Petit service Express, sans base de données, qui relie **Dokploy** et
 **GitHub** : à chaque déploiement, il pose sur le commit correspondant la
-pastille ✅/🔵/❌ que GitHub affiche nativement pour Vercel/Netlify, avec en
+pastille ✅/🟠/❌ que GitHub affiche nativement pour Vercel/Netlify, avec en
 plus une **page de détail dédiée** pour chaque déploiement.
 
 Zéro dépendance en dehors d'Express, zéro configuration par app une fois le
@@ -175,7 +175,7 @@ Chaque déploiement a sa propre page, à l'identifiant GitHub réel (le même
 `id` que `/repos/:owner/:repo/deployments/:id`) — jamais une page générique
 qui mélangerait plusieurs déploiements.
 
-**Contenu de la page** : statut coloré (🔵 en cours / 🟢 réussi / 🔴 échoué),
+**Contenu de la page** : statut coloré (🟠 en cours / 🟢 réussi / 🔴 échoué),
 projet, branche, commit, environnement, dates de lancement/fin, durée,
 timeline des changements d'état, liens vers GitHub/le commit/le site
 déployé/les logs Dokploy. Rafraîchissement automatique toutes les 5 s tant
@@ -237,7 +237,7 @@ explicite plutôt qu'un bouton qui ne fait rien.
 
 - **Pending qui ne se referme jamais** : si un commit B est poussé pendant
   que le déploiement de A tourne encore, Dokploy ne construit que B — A
-  resterait bloqué en 🔵 pour toujours. Le service mémorise le dernier commit
+  resterait bloqué en 🟠 pour toujours. Le service mémorise le dernier commit
   mis en `pending` par repo et referme automatiquement l'ancien
   (`state: success`, *« Remplacé par un déploiement plus récent »*) dès
   qu'un nouveau lui succède.
@@ -320,7 +320,7 @@ npm start
 | Symptôme | Piste |
 | --- | --- |
 | Aucune pastille sur GitHub | Vérifier les logs du service (`[webhook]`), la notification Dokploy, et que `GITHUB_TOKEN` a bien les permissions Deployments + Commit statuses |
-| Pas de pastille 🔵 « en cours » | `DOKPLOY_URL` renseigné ? `POLL` pas à `off` ? Regarder les logs `[poll]` |
+| Pas de pastille 🟠 « en cours » | `DOKPLOY_URL` renseigné ? `POLL` pas à `off` ? Regarder les logs `[poll]` |
 | `/deployments/:id` renvoie 404 | Le service a probablement redémarré depuis ce déploiement (historique en mémoire) — normal, pas un bug |
 | Clic GitHub demande un mot de passe | Le lien a été généré avant que `PUBLIC_URL` soit configuré, ou le jeton a expiré (90 j) |
 | Erreur GitHub 401/403 | Régénérer `GITHUB_TOKEN` avec les bonnes permissions |

@@ -5,7 +5,7 @@
 // déploiements puisque chaque page ne charge que /api/deployments/<son-id>.
 
 const STATUS_META = {
-  pending: { emoji: "🔵", label: "En cours", color: "#2563eb", poll: true },
+  pending: { emoji: "🟠", label: "En cours", color: "#ea580c", poll: true },
   success: { emoji: "🟢", label: "Réussi", color: "#16a34a", poll: false },
   failure: { emoji: "🔴", label: "Échoué", color: "#dc2626", poll: false },
   error: { emoji: "🔴", label: "Erreur", color: "#dc2626", poll: false },
@@ -49,7 +49,7 @@ function renderDeploymentPage() {
   .note{color:var(--muted);font-size:.85rem}
   .center{max-width:380px;margin:4rem auto;text-align:center}
   input[type=password]{width:100%;padding:.65rem .8rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:1rem;margin:.75rem 0}
-  button.primary{width:100%;padding:.7rem;border:none;border-radius:8px;background:#2563eb;color:#fff;font-size:1rem;cursor:pointer}
+  button.primary{width:100%;padding:.7rem;border:none;border-radius:8px;background:#ea580c;color:#fff;font-size:1rem;cursor:pointer}
   button.primary:disabled{opacity:.6;cursor:default}
   .error-msg{color:#dc2626;font-size:.85rem;min-height:1.2em;margin-top:.4rem}
 </style>

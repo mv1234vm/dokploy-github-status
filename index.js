@@ -110,7 +110,7 @@ function githubHeaders() {
   };
 }
 
-async function githubFetch(url, options = {}) {
+async function githubFetchOnce(url, options) {
   const to = withTimeout(10000);
   let res;
   try {
@@ -132,6 +132,27 @@ async function githubFetch(url, options = {}) {
     throw err;
   }
   return data;
+}
+
+// Bug 2 (statuts manquants) : un aléa réseau/5xx ponctuel ne doit pas suffire à
+// perdre un statut définitivement. 2 tentatives supplémentaires, backoff court.
+// Jamais de retry sur une erreur 4xx (permissions, payload invalide) : ça ne
+// changera pas de résultat, autant échouer vite et le voir dans les logs.
+async function githubFetch(url, options = {}, attempt = 0) {
+  try {
+    return await githubFetchOnce(url, options);
+  } catch (err) {
+    const retriable = !err.status || err.status >= 500;
+    if (retriable && attempt < 2) {
+      const delay = 500 * (attempt + 1);
+      console.warn(
+        `[github] tentative ${attempt + 1} échouée (${err.message}), nouvel essai dans ${delay}ms`
+      );
+      await new Promise((r) => setTimeout(r, delay));
+      return githubFetch(url, options, attempt + 1);
+    }
+    throw err;
+  }
 }
 
 const githubPost = (url, body) =>
@@ -167,23 +188,57 @@ async function setGithubStatus(owner, repo, sha, state, description, url, logUrl
   console.log(`[github] deployment status : state=${state}`);
 
   const commitState = toCommitState(state);
+  if (commitState !== "pending") await closeStalePending(owner, repo, sha);
   await githubPost(`${GITHUB_API}/repos/${owner}/${repo}/statuses/${sha}`, {
     state: commitState,
     description,
     context: "Dokploy",
     target_url: details,
   });
+  if (commitState === "pending") pendingByRepo.set(`${owner}/${repo}`, sha);
+  else if (pendingByRepo.get(`${owner}/${repo}`) === sha) pendingByRepo.delete(`${owner}/${repo}`);
   console.log(`[github] commit status : state=${commitState}`);
+}
+
+// Bug 1 (pending qui ne se referment jamais) : Dokploy ne déploie que le
+// dernier commit poussé sur la branche. Si un commit B arrive pendant que le
+// pending de A tourne encore, A est court-circuité et son rond orange ne
+// bougera plus jamais tout seul. On mémorise donc, par repo, le dernier sha
+// mis en pending par ce service ; dès qu'un sha différent doit passer en
+// pending (ou que le déploiement se termine), on referme l'ancien.
+const pendingByRepo = new Map(); // "owner/repo" -> sha actuellement en pending posé par nous
+
+async function closeStalePending(owner, repo, keepSha) {
+  const key = `${owner}/${repo}`;
+  const staleSha = pendingByRepo.get(key);
+  if (!staleSha || staleSha === keepSha) return;
+  try {
+    await githubPost(`${GITHUB_API}/repos/${owner}/${repo}/statuses/${staleSha}`, {
+      state: "success",
+      description: "Remplacé par un déploiement plus récent",
+      context: "Dokploy",
+    });
+    console.log(
+      `[github] pending clos (court-circuité) : ${owner}/${repo} ${staleSha.slice(0, 7)}`
+    );
+  } catch (err) {
+    // Le sha a pu disparaître (force-push, branche supprimée) : pas bloquant.
+    console.warn(
+      `[github] impossible de clore l'ancien pending ${staleSha.slice(0, 7)} : ${err.message}`
+    );
+  }
 }
 
 // Pose uniquement un commit status (utilisé par le webhook GitHub "push" -> en cours)
 async function setPendingStatus(owner, repo, sha, targetUrl) {
+  await closeStalePending(owner, repo, sha);
   await githubPost(`${GITHUB_API}/repos/${owner}/${repo}/statuses/${sha}`, {
     state: "pending",
     description: STATE_MAP.pending.description,
     context: "Dokploy",
     target_url: targetUrl,
   });
+  pendingByRepo.set(`${owner}/${repo}`, sha);
   console.log(`[github] commit status : state=pending (${owner}/${repo} ${sha.slice(0, 7)})`);
 }
 
@@ -277,6 +332,7 @@ const POLL_INTERVAL_MS = Math.max(
   Number(process.env.POLL_INTERVAL_MS) || 5000
 );
 const seenDeployments = new Map(); // applicationId -> dernier deploymentId "en cours" traité
+const seenFinal = new Map(); // applicationId -> dernier deploymentId final (done/error) déjà posté
 const appRepoCache = new Map(); // applicationId -> {owner,repo,branch} | null
 const learnedAppIds = new Set(); // ids vus via les notifications /webhook
 let pollerStarted = false;
@@ -325,6 +381,14 @@ async function listAppIds() {
   return ids;
 }
 
+// Le champ "description" d'un déploiement Dokploy vaut "Commit: <sha>" — bien
+// plus fiable que "dernier commit de la branche" pour un rattrapage a
+// posteriori (la branche a pu avancer depuis ce déploiement précis).
+function shaFromDeployment(deployment) {
+  const m = String(deployment?.description || "").match(/[0-9a-f]{7,40}/i);
+  return m ? m[0] : null;
+}
+
 async function pollOnce() {
   const ids = await listAppIds();
   for (const id of ids) {
@@ -340,23 +404,62 @@ async function pollOnce() {
       continue;
     }
     const latest = Array.isArray(deployments) ? deployments[0] : null;
-    if (!latest || String(latest.status || "").toLowerCase() !== "running") continue;
-    if (seenDeployments.get(id) === latest.deploymentId) continue;
-    seenDeployments.set(id, latest.deploymentId);
+    if (!latest) continue;
+    const status = String(latest.status || "").toLowerCase();
 
-    try {
-      const sha = await getHeadSha(repo.owner, repo.repo, repo.branch);
-      await setPendingStatus(
-        repo.owner,
-        repo.repo,
-        sha,
-        dokployBase ? `${dokployBase}/dashboard/projects` : undefined
-      );
-      console.log(
-        `[poll] ${repo.owner}/${repo.repo} en cours -> pending (${sha.slice(0, 7)})`
-      );
-    } catch (err) {
-      console.error("[poll] échec pending :", err.message);
+    if (status === "running") {
+      if (seenDeployments.get(id) === latest.deploymentId) continue;
+      seenDeployments.set(id, latest.deploymentId);
+      try {
+        const sha = await getHeadSha(repo.owner, repo.repo, repo.branch);
+        await setPendingStatus(
+          repo.owner,
+          repo.repo,
+          sha,
+          dokployBase ? `${dokployBase}/dashboard/projects` : undefined
+        );
+        console.log(
+          `[poll] ${repo.owner}/${repo.repo} en cours -> pending (${sha.slice(0, 7)})`
+        );
+      } catch (err) {
+        console.error("[poll] échec pending :", err.message);
+      }
+      continue;
+    }
+
+    // Bug 2 (statuts manquants) : filet de rattrapage. Si le webhook Dokploy
+    // n'a jamais atteint ce service pour ce déploiement (down, retry réseau
+    // épuisé, etc.), on pose ici le statut final a posteriori — idempotent
+    // par deploymentId, donc sans risque de doublon avec un webhook qui a
+    // bien fonctionné.
+    if (status === "done" || status === "error") {
+      if (seenFinal.get(id) === latest.deploymentId) continue;
+      seenFinal.set(id, latest.deploymentId);
+      // On a vu ce déploiement passer par "running" via ce même service : le
+      // webhook Dokploy a de bonnes chances d'avoir déjà posté le statut
+      // final normalement. On ne double-poste pas dans ce cas (bruit inutile
+      // sur GitHub) — le rattrapage ne sert que pour les déploiements dont on
+      // n'a JAMAIS eu la moindre nouvelle avant qu'ils se terminent.
+      if (seenDeployments.get(id) === latest.deploymentId) continue;
+      const sha = shaFromDeployment(latest);
+      if (!sha) continue; // rien d'exploitable, pas de commit identifiable
+      try {
+        const mapped = STATE_MAP[status === "done" ? "success" : "failure"];
+        await setGithubStatus(
+          repo.owner,
+          repo.repo,
+          sha,
+          mapped.state,
+          mapped.description,
+          undefined,
+          dokployBase ? `${dokployBase}/dashboard/projects` : undefined
+        );
+        console.log(
+          `[poll] rattrapage statut final : ${repo.owner}/${repo.repo} ${sha.slice(0, 7)} -> ${mapped.state}`
+        );
+      } catch (err) {
+        console.error("[poll] échec rattrapage :", err.message);
+      }
     }
   }
 }

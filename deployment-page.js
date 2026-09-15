@@ -13,6 +13,8 @@ const STATUS_META = {
 
 function renderDeploymentPage() {
   return `<title>Détail du déploiement</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#ea580c">
 <style>
   :root{color-scheme:light dark;--bg:#f7f7f8;--card:#fff;--text:#1a1a1a;--muted:#6b7280;--border:#e5e7eb;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
   @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#111214;--card:#1b1c1f;--text:#f0f0f0;--muted:#9aa0a6;--border:#2c2d31}}
@@ -210,6 +212,9 @@ function renderDeploymentPage() {
     var repoUrl = "https://github.com/" + record.owner + "/" + record.repo;
     addAction(actions, "GitHub", repoUrl);
     if (record.sha) addAction(actions, "Voir le commit", repoUrl + "/commit/" + record.sha);
+    if (record.previousSha && record.sha) {
+      addAction(actions, "Comparer avec le précédent", repoUrl + "/compare/" + record.previousSha + "..." + record.sha);
+    }
     if (record.appUrl) addAction(actions, "Voir le site", record.appUrl);
     if (record.dokployLogUrl) addAction(actions, "Logs Dokploy", record.dokployLogUrl);
 

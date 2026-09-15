@@ -1,6 +1,8 @@
 const crypto = require("crypto");
 const express = require("express");
 const store = require("./store");
+const auditLog = require("./audit-log");
+const mute = require("./mute");
 const { makeSigner } = require("./auth");
 const { renderDeploymentPage } = require("./deployment-page");
 const { renderAdminPage } = require("./admin-page");
@@ -36,7 +38,18 @@ const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || "";
 // Pages /deployments/:id : URL publique de CE service (pour construire les
 // liens qu'on pose sur GitHub) + mot de passe d'accès direct.
 const PUBLIC_URL = (process.env.PUBLIC_URL || "").replace(/\/+$/, "");
-const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || "";
+// Mutable : /api/change-password peut la mettre à jour à chaud (voir plus
+// bas). Sans SELF_APPLICATION_ID, le changement ne survit pas à un
+// redéploiement — DASHBOARD_PASSWORD dans l'env Dokploy reste la source de
+// vérité au redémarrage.
+let DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || "";
+// Optionnel : applicationId Dokploy de CE service lui-même. Ne sert qu'à
+// /api/change-password pour réécrire DASHBOARD_PASSWORD dans l'env Dokploy
+// (sinon la rotation reste en mémoire seulement, perdue au redéploiement).
+const SELF_APPLICATION_ID = process.env.SELF_APPLICATION_ID || "";
+// Optionnel : URL appelée en POST à chaque changement de statut (JSON), pour
+// brancher n'importe quel outil tiers sans intégration dédiée.
+const OUTGOING_WEBHOOK_URL = process.env.OUTGOING_WEBHOOK_URL || "";
 let APP_MAP = {};
 try {
   APP_MAP = process.env.APP_MAP ? JSON.parse(process.env.APP_MAP) : {};
@@ -282,6 +295,34 @@ async function setGithubStatus(owner, repo, sha, state, description, url, logUrl
   if (commitState === "pending") pendingByRepo.set(key, { sha, deploymentId });
   else if (open && open.deploymentId === deploymentId) pendingByRepo.delete(key);
   console.log(`[github] commit status : state=${commitState}`);
+
+  fireOutgoingWebhook({
+    id: deploymentId,
+    owner,
+    repo,
+    sha,
+    branch: meta.branch || null,
+    appName: meta.appName || null,
+    environment: meta.environment || "production",
+    status: state,
+    description,
+    url: details,
+  });
+}
+
+// Best-effort, ne bloque jamais le traitement principal : une intégration
+// tierce en panne ne doit jamais empêcher de poser le statut GitHub.
+function fireOutgoingWebhook(payload) {
+  if (!OUTGOING_WEBHOOK_URL) return;
+  const to = withTimeout(5000);
+  fetch(OUTGOING_WEBHOOK_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: to.signal,
+  })
+    .catch((err) => console.warn("[outgoing-webhook] échec :", err.message))
+    .finally(to.done);
 }
 
 // Bug 1 (pending qui ne se referment jamais) : Dokploy ne déploie que le
@@ -826,8 +867,10 @@ app.post("/api/login", (req, res) => {
   }
   const password = req.body && req.body.password;
   if (typeof password !== "string" || !safeEqual(password, DASHBOARD_PASSWORD)) {
+    auditLog.record("login_failure", { ip: req.ip || "?" });
     return res.status(401).json({ error: "Mot de passe incorrect." });
   }
+  auditLog.record("login_success", { ip: req.ip || "?" });
   const token = signer.sign("session", 60 * 60 * 24 * 30); // 30 jours
   res.json({ token });
 });
@@ -869,7 +912,7 @@ app.get("/api/deployments/:id", (req, res) => {
   }
   const record = store.get(id);
   if (!record) return res.status(404).json({ error: "Déploiement introuvable" });
-  res.json(record);
+  res.json({ ...record, previousSha: store.previousSha(record) });
 });
 
 // Une seule page HTML pour tous les déploiements : le rendu (et
@@ -881,12 +924,26 @@ app.get("/deployments/:id", (_req, res) => {
 
 // Liste + état de santé de tous les sites : réservé au mot de passe, jamais
 // accessible via un jeton de lien scopé à un seul déploiement.
+const VALID_STATUSES = new Set(["pending", "success", "failure", "error"]);
+
 app.get("/api/deployments", (req, res) => {
   if (!isSessionAuthorized(req)) {
     return res.status(401).json({ error: "Authentification requise" });
   }
-  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
-  res.json({ deployments: store.list(limit), health: store.latestByRepo() });
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+  const offset = Math.max(0, Number(req.query.offset) || 0);
+  const status = VALID_STATUSES.has(req.query.status) ? req.query.status : undefined;
+  const search = typeof req.query.search === "string" ? req.query.search.slice(0, 200) : undefined;
+  const { total, items } = store.list(limit, offset, { status, search });
+  res.json({
+    deployments: items,
+    total,
+    limit,
+    offset,
+    health: store.latestByRepo(),
+    stats: store.statsByRepo(),
+    mutedRepos: mute.list(),
+  });
 });
 
 // Anti-spam sur le bouton "Relancer" : 1 relance / 30 s par application
@@ -920,11 +977,80 @@ app.post("/api/deployments/:id/retry", async (req, res) => {
   }
   try {
     await dokployPost("/api/application.deploy", { applicationId: record.applicationId });
+    auditLog.record("retry", { ip: req.ip || "?", deploymentId: id, owner: record.owner, repo: record.repo });
     res.json({ ok: true });
   } catch (err) {
     console.error("[retry] échec relance Dokploy :", err.message, err.detail || "");
     res.status(502).json({ error: "Échec de la relance Dokploy" });
   }
+});
+
+app.get("/api/audit-log", (req, res) => {
+  if (!isSessionAuthorized(req)) {
+    return res.status(401).json({ error: "Authentification requise" });
+  }
+  res.json({ entries: auditLog.list(100) });
+});
+
+app.post("/api/change-password", async (req, res) => {
+  if (!isSessionAuthorized(req)) {
+    return res.status(401).json({ error: "Authentification requise" });
+  }
+  if (!DASHBOARD_PASSWORD) {
+    return res.status(503).json({ error: "Accès par mot de passe non configuré" });
+  }
+  const { currentPassword, newPassword } = req.body || {};
+  if (typeof currentPassword !== "string" || !safeEqual(currentPassword, DASHBOARD_PASSWORD)) {
+    return res.status(401).json({ error: "Mot de passe actuel incorrect" });
+  }
+  if (typeof newPassword !== "string" || newPassword.length < 8) {
+    return res.status(400).json({ error: "Le nouveau mot de passe doit faire au moins 8 caractères" });
+  }
+  const previous = DASHBOARD_PASSWORD;
+  DASHBOARD_PASSWORD = newPassword;
+  auditLog.record("password_change", { ip: req.ip || "?" });
+
+  if (!SELF_APPLICATION_ID || !DOKPLOY_API_KEY) {
+    return res.json({
+      ok: true,
+      warning:
+        "SELF_APPLICATION_ID non configuré : le changement n'est actif qu'en mémoire et sera perdu au prochain redéploiement. Mets aussi à jour DASHBOARD_PASSWORD dans l'environnement Dokploy pour le rendre définitif.",
+    });
+  }
+  try {
+    const currentEnv = await dokployGet(`/api/application.one?applicationId=${encodeURIComponent(SELF_APPLICATION_ID)}`);
+    const lines = String(currentEnv?.env || "")
+      .split("\n")
+      .filter((l) => l && !l.startsWith("DASHBOARD_PASSWORD="));
+    lines.push(`DASHBOARD_PASSWORD=${newPassword}`);
+    await dokployPost("/api/application.update", {
+      applicationId: SELF_APPLICATION_ID,
+      env: lines.join("\n"),
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    // La mémoire a déjà le nouveau mot de passe (utilisable tout de suite),
+    // mais l'écriture Dokploy a échoué : on revient sur l'ancien pour éviter
+    // un mot de passe qui "marche maintenant mais plus après un redeploy"
+    // sans que l'utilisateur le sache.
+    DASHBOARD_PASSWORD = previous;
+    console.error("[change-password] échec de la mise à jour Dokploy :", err.message, err.detail || "");
+    res.status(502).json({
+      error: "Échec de l'écriture dans l'environnement Dokploy, mot de passe inchangé",
+    });
+  }
+});
+
+app.post("/api/repos/:owner/:repo/mute", (req, res) => {
+  if (!isSessionAuthorized(req)) {
+    return res.status(401).json({ error: "Authentification requise" });
+  }
+  const { owner, repo } = req.params;
+  if (!NAME_RE.test(owner) || !NAME_RE.test(repo)) {
+    return res.status(400).json({ error: "owner/repo invalide" });
+  }
+  const nowMuted = mute.toggle(`${owner}/${repo}`);
+  res.json({ ok: true, muted: nowMuted });
 });
 
 // Page HTML de la liste + santé (même principe que /deployments/:id : le
@@ -970,6 +1096,31 @@ app.get("/debug-poll", async (req, res) => {
     out.apps.push(entry);
   }
   res.type("application/json").send(JSON.stringify(out, null, 2));
+});
+
+// Manifest minimal pour permettre "Ajouter à l'écran d'accueil" sur mobile.
+// Pas de service worker : la page reste toujours servie par le réseau (pas
+// de mode hors-ligne), juste une icône + un nom d'app propres une fois épinglée.
+app.get("/manifest.json", (_req, res) => {
+  res.json({
+    name: "dokploy-github-status",
+    short_name: "Déploiements",
+    start_url: "/deployments",
+    display: "standalone",
+    background_color: "#f7f7f8",
+    theme_color: "#ea580c",
+    icons: [
+      {
+        src:
+          "data:image/svg+xml," +
+          encodeURIComponent(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="20" fill="#ea580c"/><text x="50" y="66" font-size="56" text-anchor="middle" font-family="system-ui">🚀</text></svg>'
+          ),
+        sizes: "any",
+        type: "image/svg+xml",
+      },
+    ],
+  });
 });
 
 app.get("/", (_req, res) => {

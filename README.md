@@ -115,6 +115,8 @@ commit GitHub reçoit sa pastille, cliquable vers sa page de détail.
 | `PUBLIC_URL` | non | URL publique de **ce service**, sans `/` final — active les pages `/deployments/:id` |
 | `DASHBOARD_PASSWORD` | non | Mot de passe pour ouvrir une page `/deployments/:id` en dehors d'un clic GitHub, et pour tout ce qui est derrière `/deployments` (liste, santé, relance) |
 | `DATA_DIR` | non | Dossier où persister `deployments.json` (défaut `./data`) — voir [Persistance](#persistance) |
+| `SELF_APPLICATION_ID` | non | `applicationId` Dokploy de **ce service lui-même** — permet à `/api/change-password` de réécrire `DASHBOARD_PASSWORD` dans l'environnement Dokploy. Sans elle, un changement de mot de passe reste en mémoire seulement et se perd au prochain redéploiement. |
+| `OUTGOING_WEBHOOK_URL` | non | URL appelée en `POST` (JSON) à chaque changement de statut, pour brancher un outil tiers sans intégration dédiée |
 
 \* Il faut `DOKPLOY_API_KEY` **ou** `GITHUB_OWNER`/`APP_MAP` (au moins un des
 deux).
@@ -128,9 +130,13 @@ deux).
 | `GET /deployments/:id` | Page de détail d'un déploiement (HTML) |
 | `GET /api/deployments/:id` | Données JSON d'un déploiement, protégées par jeton (lien ou session) |
 | `GET /deployments` | Liste + état de santé de tous les sites (HTML, **mot de passe requis**) |
-| `GET /api/deployments` | Liste + santé en JSON, **jeton de session uniquement** (un jeton de lien ne fonctionne pas ici) |
-| `POST /api/deployments/:id/retry` | Relance le déploiement via l'API Dokploy, **jeton de session uniquement** |
+| `GET /api/deployments` | Liste (paginée, filtrable) + santé + stats en JSON, **jeton de session uniquement** |
+| `POST /api/deployments/:id/retry` | Relance le déploiement via l'API Dokploy, **jeton de session uniquement**, anti-spam 1/30s |
+| `POST /api/repos/:owner/:repo/mute` | Bascule le mode maintenance d'un repo (cosmétique), **jeton de session uniquement** |
+| `GET /api/audit-log` | Historique des connexions/relances/changements de mot de passe, **jeton de session uniquement** |
+| `POST /api/change-password` | Change `DASHBOARD_PASSWORD` (ancien mot de passe requis), **jeton de session uniquement** |
 | `POST /api/login` | Échange un mot de passe contre un jeton de session |
+| `GET /manifest.json` | Manifest PWA pour "Ajouter à l'écran d'accueil" |
 | `GET /health` | Vérification de disponibilité + état du sondage Dokploy |
 | `GET /` | Page d'accueil du service |
 
@@ -247,6 +253,38 @@ par application, quel que soit l'id de déploiement utilisé pour y accéder.
   généré côté navigateur, aucune donnée renvoyée au serveur).
 - **Thème clair/sombre manuel** (bouton 🌓), en plus du suivi automatique de
   `prefers-color-scheme` ; le choix est mémorisé dans `localStorage`.
+- **Filtres partageables par URL** (`/deployments?status=failure&search=bischwihr`) —
+  le bouton 🔗 copie un lien direct vers l'état filtré actuel.
+- **Pagination** de la liste (50 par page, bouton "Charger plus") pour rester
+  léger même si l'historique grossit ; la section santé n'est pas paginée
+  (une ligne par repo, naturellement bornée).
+- **Sparkline + taux de succès + durée moyenne** par site dans la section
+  santé : barres des déploiements/jour sur 14 jours, % de succès sur les 20
+  derniers, durée moyenne de build. Un déploiement `pending` qui dépasse 1,5×
+  cette moyenne est signalé en rouge (indicatif, pas une alerte active).
+- **Frise d'activité globale** (tous sites confondus) en haut de page : un
+  point coloré par déploiement récent, au survol le repo/statut/date.
+- **Mode maintenance par repo** : bouton "Marquer maintenance" sur un site
+  dans la section santé — purement cosmétique (badge 🔧 grisé au lieu d'une
+  alerte visuelle), ne touche à rien côté GitHub/Dokploy.
+- **Raccourcis clavier** : `/` focus la recherche, `r` force une actualisation.
+- **PWA légère** : `/manifest.json` permet "Ajouter à l'écran d'accueil" sur
+  mobile (pas de mode hors-ligne, juste une icône/nom d'app propres).
+
+### Sécurité (panneau dépliable sur `/deployments`)
+
+- **Rotation du mot de passe** depuis l'UI (`POST /api/change-password`,
+  ancien mot de passe requis, 8 caractères minimum pour le nouveau). Sans
+  `SELF_APPLICATION_ID` configuré, le changement reste actif en mémoire mais
+  ne survit pas à un redéploiement — mets aussi à jour `DASHBOARD_PASSWORD`
+  dans l'environnement Dokploy pour le rendre définitif. Avec
+  `SELF_APPLICATION_ID`, le service réécrit lui-même la variable dans
+  l'environnement Dokploy (et n'applique le changement que si cette écriture
+  réussit, pour ne jamais se retrouver avec un mot de passe qui "marche
+  maintenant mais plus après un redeploy" sans le savoir).
+- **Journal d'audit** (`GET /api/audit-log`) : connexions réussies/échouées,
+  relances déclenchées, changements de mot de passe — avec IP et horodatage.
+  200 entrées max, persisté comme le reste dans `DATA_DIR`.
 
 ## Fiabilité (pending bloqués, statuts manquants)
 
@@ -311,7 +349,9 @@ réussi, `failed`/`failure` → échoué, `error` → erreur.
 
 ```
 index.js             serveur Express, routes, poller Dokploy, logique GitHub
-store.js             historique persisté (JSON) des déploiements (par id GitHub)
+store.js             historique persisté (JSON) des déploiements (par id GitHub) + stats
+audit-log.js          journal d'audit persisté (connexions, relances, mot de passe)
+mute.js               liste persistée des repos en mode maintenance
 auth.js              jetons de session/lien signés (HMAC), sans état serveur
 deployment-page.js   page HTML de /deployments/:id (rendu + auth côté client)
 admin-page.js        page HTML de /deployments (liste + santé, mot de passe requis)

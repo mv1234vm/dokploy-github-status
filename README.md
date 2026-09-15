@@ -231,7 +231,22 @@ déclenche un nouveau déploiement via l'API Dokploy
 (`POST /api/application.deploy`) pour l'`applicationId` concerné. Fonctionne
 uniquement pour les déploiements créés après cette mise à jour (c'est là que
 `applicationId` a commencé à être enregistré) ; sinon message d'erreur
-explicite plutôt qu'un bouton qui ne fait rien.
+explicite plutôt qu'un bouton qui ne fait rien. Anti-spam : 1 relance / 30 s
+par application, quel que soit l'id de déploiement utilisé pour y accéder.
+
+### Confort de la page `/deployments`
+
+- **Actualisation automatique** toutes les 8 s (santé + liste), sans recharger
+  la page.
+- **Filtre** par repo/app et par statut sur la liste des déploiements (la
+  section santé n'est pas filtrée, elle reste toujours complète).
+- **Badge d'ancienneté** sur chaque site dans la section santé (« il y a 3 j »,
+  etc.), affiché en orange au-delà de 30 jours sans nouveau déploiement —
+  purement indicatif, aucune alerte n'est envoyée.
+- **Export JSON/CSV** de l'historique affiché, en un clic (téléchargement
+  généré côté navigateur, aucune donnée renvoyée au serveur).
+- **Thème clair/sombre manuel** (bouton 🌓), en plus du suivi automatique de
+  `prefers-color-scheme` ; le choix est mémorisé dans `localStorage`.
 
 ## Fiabilité (pending bloqués, statuts manquants)
 

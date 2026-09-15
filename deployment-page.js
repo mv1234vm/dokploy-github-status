@@ -15,7 +15,8 @@ function renderDeploymentPage() {
   return `<title>Détail du déploiement</title>
 <style>
   :root{color-scheme:light dark;--bg:#f7f7f8;--card:#fff;--text:#1a1a1a;--muted:#6b7280;--border:#e5e7eb;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-  @media (prefers-color-scheme:dark){:root{--bg:#111214;--card:#1b1c1f;--text:#f0f0f0;--muted:#9aa0a6;--border:#2c2d31}}
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#111214;--card:#1b1c1f;--text:#f0f0f0;--muted:#9aa0a6;--border:#2c2d31}}
+  :root[data-theme="dark"]{--bg:#111214;--card:#1b1c1f;--text:#f0f0f0;--muted:#9aa0a6;--border:#2c2d31}
   *{box-sizing:border-box}
   body{background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:0 0 4rem}
   a{color:inherit}
@@ -23,7 +24,7 @@ function renderDeploymentPage() {
   .top-nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem;font-size:.9rem}
   .top-nav a{color:var(--muted);text-decoration:none}
   .top-nav a:hover{text-decoration:underline}
-  #logout{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:.35rem .7rem;font-size:.8rem;cursor:pointer}
+  #logout,#theme-toggle{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:.35rem .7rem;font-size:.8rem;cursor:pointer;font-family:inherit}
   .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;margin-bottom:1rem}
   .status-banner{display:flex;align-items:center;gap:.75rem;padding:1.1rem 1.25rem;border-radius:12px;margin-bottom:1rem;font-size:1.15rem;font-weight:600}
   .status-emoji{font-size:1.6rem;line-height:1}
@@ -56,7 +57,8 @@ function renderDeploymentPage() {
 <div class="wrap">
   <div class="top-nav">
     <a href="/">← Retour</a>
-    <span style="display:flex;gap:.75rem;align-items:center">
+    <span style="display:flex;gap:.5rem;align-items:center">
+      <button id="theme-toggle" title="Changer de thème">🌓</button>
       <a id="admin-link" href="/deployments" hidden>Tous les sites</a>
       <button id="logout" hidden>Se déconnecter</button>
     </span>
@@ -134,6 +136,25 @@ function renderDeploymentPage() {
   function rememberLinkTokenIfAny() {
     if (linkToken) localStorage.setItem("dgs_link_" + id, linkToken);
   }
+
+  function applyTheme(theme) {
+    if (theme) document.documentElement.setAttribute("data-theme", theme);
+    else document.documentElement.removeAttribute("data-theme");
+  }
+  (function initTheme() {
+    try {
+      var saved = localStorage.getItem("dgs_theme");
+      if (saved) applyTheme(saved);
+    } catch (e) {}
+  })();
+  $("#theme-toggle").addEventListener("click", function () {
+    var current = document.documentElement.getAttribute("data-theme");
+    var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    var effectiveDark = current ? current === "dark" : prefersDark;
+    var next = effectiveDark ? "light" : "dark";
+    applyTheme(next);
+    try { localStorage.setItem("dgs_theme", next); } catch (e) {}
+  });
 
   var pollTimer = null;
 

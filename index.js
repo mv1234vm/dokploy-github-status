@@ -889,6 +889,18 @@ app.get("/api/deployments", (req, res) => {
   res.json({ deployments: store.list(limit), health: store.latestByRepo() });
 });
 
+// Anti-spam sur le bouton "Relancer" : 1 relance / 30 s par application
+// Dokploy visée, quel que soit l'id de déploiement utilisé pour y accéder.
+const retryAttempts = new Map(); // applicationId -> timestamp du dernier essai
+const RETRY_COOLDOWN_MS = 30000;
+function retryThrottled(applicationId) {
+  const last = retryAttempts.get(applicationId);
+  const now = Date.now();
+  if (last && now - last < RETRY_COOLDOWN_MS) return RETRY_COOLDOWN_MS - (now - last);
+  retryAttempts.set(applicationId, now);
+  return 0;
+}
+
 app.post("/api/deployments/:id/retry", async (req, res) => {
   if (!isSessionAuthorized(req)) {
     return res.status(401).json({ error: "Authentification requise" });
@@ -901,6 +913,10 @@ app.post("/api/deployments/:id/retry", async (req, res) => {
   if (!record) return res.status(404).json({ error: "Déploiement introuvable" });
   if (!record.applicationId) {
     return res.status(409).json({ error: "applicationId inconnu pour ce déploiement, relance impossible" });
+  }
+  const waitMs = retryThrottled(record.applicationId);
+  if (waitMs > 0) {
+    return res.status(429).json({ error: `Relance déjà lancée récemment, réessaie dans ${Math.ceil(waitMs / 1000)} s` });
   }
   try {
     await dokployPost("/api/application.deploy", { applicationId: record.applicationId });

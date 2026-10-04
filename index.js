@@ -508,17 +508,24 @@ let pollerStarted = false;
 // Récupère (et met en cache) le repo GitHub d'une application via son id
 async function getAppRepo(applicationId) {
   if (appRepoCache.has(applicationId)) return appRepoCache.get(applicationId);
-  let repo = null;
   try {
     const a = await dokployGet(
       `/api/application.one?applicationId=${encodeURIComponent(applicationId)}`
     );
-    repo = repoFromApp(a);
-  } catch {
-    /* app inaccessible / pas une application : on garde null */
+    const repo = repoFromApp(a);
+    // On ne met en cache QUE les résolutions réussies (y compris "cette app
+    // n'est pas une app git" -> repo=null mais appel réussi). Un échec
+    // réseau/API transitoire (ex. juste après un redémarrage, pendant que
+    // Dokploy est momentanément indisponible) ne doit jamais blacklister
+    // l'app pour le reste de la vie du conteneur — sinon un déploiement de
+    // cette app précise reste bloqué en pending pour toujours, le poller ne
+    // la revoyant plus jamais tant qu'il n'est pas lui-même redéployé.
+    appRepoCache.set(applicationId, repo);
+    return repo;
+  } catch (err) {
+    console.warn(`[poll] résolution de l'app ${applicationId} échouée, retentera au prochain tick :`, err.message);
+    return null;
   }
-  appRepoCache.set(applicationId, repo);
-  return repo;
 }
 
 // Parcourt récursivement la réponse project.all (project -> environments -> applications)
@@ -588,7 +595,8 @@ async function pollOnce() {
       deployments = await dokployGet(
         `/api/deployment.all?applicationId=${encodeURIComponent(id)}`
       );
-    } catch {
+    } catch (err) {
+      console.warn(`[poll] deployment.all indisponible pour ${repo.owner}/${repo.repo} :`, err.message);
       continue;
     }
     const latest = Array.isArray(deployments) ? deployments[0] : null;

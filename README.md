@@ -50,6 +50,7 @@ conteneur Node).
 - [Sécurité](#sécurité)
 - [Tests](#tests)
 - [Fiabilité](#fiabilité)
+- [Limites connues](#limites-connues)
 - [Test manuel](#test-manuel)
 - [Structure du projet](#structure-du-projet)
 - [Développement local](#développement-local)
@@ -325,6 +326,48 @@ chaque changement (voir [Test manuel](#test-manuel)).
   déploiements terminés récemment sont rattrapés, pas tout l'historique.
 - **Alerte poller en panne** : `/health` expose `pollFailureStreak` /
   `lastPollError` si le sondage Dokploy échoue en continu (clé API expirée…).
+
+## Limites connues
+
+Honnêtes sur ce que ce service ne fait pas (encore), ou pas bien :
+
+- **Tout l'état du poller est en mémoire, perdu à chaque redémarrage** —
+  `pendingByRepo`, le cache repo par app, les ids d'app déjà vus. Un
+  redémarrage qui tombe pile pendant un build en cours peut faire créer un
+  second GitHub Deployment pour ce même déploiement (l'ancien reste
+  `in_progress`), et un redémarrage juste après coupe temporairement la
+  détection "en cours" pour toutes les apps tant qu'elles n'ont pas été
+  revues au moins une fois. Seul l'historique (`store.js`) est persisté sur
+  disque, pas cet état de suivi.
+- **Ce service qui se surveille lui-même est un cas particulier fragile** :
+  chaque déploiement de `dokploy-github-status` redémarre le processus qui
+  est censé poser son propre statut — exactement le pire moment pour perdre
+  l'état en mémoire mentionné ci-dessus. Un bug déjà rencontré en pratique
+  (corrigé depuis, voir l'historique de commits) : un échec API transitoire
+  juste après un redémarrage pouvait bloquer la détection de SA PROPRE app
+  jusqu'au redémarrage suivant.
+- **Pas de rollback réel** : l'API publique de Dokploy n'expose pas de
+  endpoint pour revenir à une image précédente (vérifié directement — seul
+  `application.deploy`, qui rebuild le HEAD actuel, existe). Le bouton
+  "Relancer" relance le déploiement courant, il ne restaure pas une version
+  antérieure.
+- **Pas de rattrapage au-delà de `CATCHUP_MAX_AGE_MS`** : un déploiement
+  resté bloqué plus longtemps que la fenêtre de rattrapage (15 min par
+  défaut) à cause d'un redémarrage du service ne sera jamais corrigé tout
+  seul — il faut reposter son statut manuellement via `/webhook` (voir [Test
+  manuel](#test-manuel)) ou attendre le prochain déploiement réel du même
+  repo.
+- **Un seul mot de passe partagé** : pas de comptes nommés. Le journal
+  d'audit distingue les actions par IP, pas par utilisateur.
+- **Export et frise d'activité limités à la page courante** : "Export
+  JSON/CSV" et la frise "Activité récente" sur `/deployments` ne portent que
+  sur les déploiements actuellement chargés (une page, éventuellement
+  filtrée) — pas sur l'historique complet en un clic.
+- **Pas de tests d'intégration HTTP** : seules `store.js` et `auth.js` ont
+  des tests automatisés. Les routes Express sont vérifiées manuellement.
+- **Logs de build non rapatriés** : `/deployments/:id` ne montre qu'un lien
+  vers les logs Dokploy, pas leur contenu — l'API Dokploy accessible par
+  clé ne les expose pas (ils ne sont servis qu'au dashboard, via WebSocket).
 
 ## Test manuel
 

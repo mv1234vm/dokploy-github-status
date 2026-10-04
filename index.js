@@ -626,13 +626,6 @@ async function pollOnce() {
     // bien fonctionné.
     if (status === "done" || status === "error") {
       if (seenFinal.get(id) === latest.deploymentId) continue;
-      seenFinal.set(id, latest.deploymentId);
-      // On a vu ce déploiement passer par "running" via ce même service : le
-      // webhook Dokploy a de bonnes chances d'avoir déjà posté le statut
-      // final normalement. On ne double-poste pas dans ce cas (bruit inutile
-      // sur GitHub) — le rattrapage ne sert que pour les déploiements dont on
-      // n'a JAMAIS eu la moindre nouvelle avant qu'ils se terminent.
-      if (seenDeployments.get(id) === latest.deploymentId) continue;
       // Après un redémarrage du service, sa mémoire est vide : sans ce
       // garde-fou, TOUS les derniers déploiements de TOUTES les apps
       // paraîtraient "jamais vus" et se feraient reposter d'un coup, même
@@ -642,7 +635,27 @@ async function pollOnce() {
       const finishedAt = new Date(
         latest.finishedAt || latest.startedAt || latest.createdAt || 0
       ).getTime();
-      if (!finishedAt || Date.now() - finishedAt > CATCHUP_MAX_AGE_MS) continue;
+      if (!finishedAt || Date.now() - finishedAt > CATCHUP_MAX_AGE_MS) {
+        seenFinal.set(id, latest.deploymentId);
+        continue;
+      }
+      // On a vu ce déploiement passer par "running" via ce même service : le
+      // webhook Dokploy va probablement poser le statut final lui-même dans
+      // la seconde — on lui laisse une courte fenêtre pour éviter de
+      // double-poster dans le cas normal où tout fonctionne. Mais passé ce
+      // délai, on pose quand même : un webhook qui échoue (notification
+      // perdue, secret désynchronisé...) ne doit JAMAIS laisser un
+      // déploiement bloqué en pending indéfiniment — c'était le bug exact de
+      // l'ancienne version de ce garde-fou (déploiement resté "en cours"
+      // plus d'une heure alors que Dokploy l'affichait déjà "done").
+      const WEBHOOK_GRACE_MS = 90 * 1000;
+      if (
+        seenDeployments.get(id) === latest.deploymentId &&
+        Date.now() - finishedAt < WEBHOOK_GRACE_MS
+      ) {
+        continue; // ne marque pas seenFinal : retenté au prochain tick
+      }
+      seenFinal.set(id, latest.deploymentId);
       const sha = shaFromDeployment(latest);
       if (!sha) continue; // rien d'exploitable, pas de commit identifiable
       try {

@@ -297,7 +297,11 @@ chaque changement (voir [Test manuel](#test-manuel)).
   dès qu'un nouveau lui succède sur le même repo.
 - **Statuts jamais posés** (webhook manqué) : appels GitHub réessayés (2
   tentatives, backoff) sur erreur réseau/5xx. Le sondage périodique sert de
-  filet de rattrapage pour les déploiements jamais vus en `running`.
+  filet de rattrapage, y compris pour un déploiement déjà vu en `running` par
+  ce service : si le webhook Dokploy ne pose pas le statut final dans les 90
+  secondes qui suivent sa fin (notification perdue, secret désynchronisé…),
+  le poller le pose lui-même — un déploiement ne reste plus bloqué en 🟠
+  indéfiniment juste parce que le webhook a échoué une fois.
 - **Rafale au redémarrage** évitée par `CATCHUP_MAX_AGE_MS` : seuls les
   déploiements terminés récemment sont rattrapés, pas tout l'historique.
 - **Alerte poller en panne** : `/health` expose `pollFailureStreak` /

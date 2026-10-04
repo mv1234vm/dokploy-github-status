@@ -1,9 +1,15 @@
 # dokploy-github-status
 
-Service Express, sans base de données, qui relie **Dokploy** à **GitHub** :
-à chaque déploiement, il pose sur le commit la pastille ✅ / 🟠 / ❌ que
-GitHub affiche nativement pour Vercel/Netlify — avec en plus une vraie page
-de détail par déploiement et un tableau de bord santé pour tous les sites.
+[![License: MIT](https://img.shields.io/badge/license-MIT-ea580c.svg)](LICENSE)
+[![Node >= 20](https://img.shields.io/badge/node-%3E%3D20-16a34a.svg)](Dockerfile)
+[![Zero dependency](https://img.shields.io/badge/dependencies-Express%20only-blue.svg)](package.json)
+[![Tests: node:test](https://img.shields.io/badge/tests-node%3Atest-brightgreen.svg)](test/)
+
+**Vercel/Netlify-style deployment status for Dokploy.** Un petit service
+Express, sans base de données, qui relie **Dokploy** à **GitHub** : à chaque
+déploiement, il pose sur le commit la pastille ✅ / 🟠 / ❌ que GitHub affiche
+nativement — avec en plus une vraie page de détail par déploiement et un
+tableau de bord santé pour tous tes sites.
 
 Zéro dépendance en dehors d'Express, zéro configuration par app : le service
 découvre lui-même le repo GitHub de chaque application Dokploy.
@@ -21,7 +27,14 @@ découvre lui-même le repo GitHub de chaque application Dokploy.
                           GET /deployments/:id  ← ce que "Details" ouvre
 ```
 
----
+## Pourquoi
+
+Dokploy ne pose pas nativement de statut sur les commits GitHub — pas de
+pastille ✅/❌ dans l'historique, pas de check sur les PR, pas de lien direct
+vers le déploiement correspondant à un commit. Ce service comble ce manque,
+exactement comme le fait Vercel ou Netlify sur leurs intégrations GitHub,
+sans rien ajouter à l'infrastructure (pas de DB, pas de queue, un seul
+conteneur Node).
 
 ## Sommaire
 
@@ -41,6 +54,8 @@ découvre lui-même le repo GitHub de chaque application Dokploy.
 - [Structure du projet](#structure-du-projet)
 - [Développement local](#développement-local)
 - [Dépannage](#dépannage)
+- [Contribuer](#contribuer)
+- [Licence](#licence)
 
 ---
 
@@ -95,7 +110,9 @@ Dokploy → **Notifications** → **Add** → **Webhook**
 
 ### 6. C'est fini
 Aucune configuration par app. Déploie n'importe quelle app Dokploy → le bon
-commit GitHub reçoit sa pastille, cliquable vers sa page de détail.
+commit GitHub reçoit sa pastille, cliquable vers sa page de détail. L'URL et
+le header webhook pour une nouvelle app sont aussi récupérables directement
+depuis le panneau *Configuration* du tableau de bord (`/deployments`).
 
 ## Variables d'environnement
 
@@ -133,7 +150,8 @@ deux).
 | `GET /api/deployments` | Liste paginée/filtrable + santé + stats, **jeton de session uniquement** |
 | `POST /api/deployments/:id/retry` | Relance le déploiement via l'API Dokploy, **session uniquement**, anti-spam 1/30s |
 | `POST /api/repos/:owner/:repo/mute` | Bascule le mode maintenance d'un repo, **session uniquement** |
-| `GET /api/audit-log` | Historique des connexions/relances/mots de passe, **session uniquement** |
+| `GET /api/audit-log` | Historique des connexions/relances/mots de passe, filtrable, **session uniquement** |
+| `GET /api/webhook-config` | URL + header webhook prêts à copier pour une nouvelle app, **session uniquement** |
 | `POST /api/change-password` | Change `DASHBOARD_PASSWORD` (ancien mot de passe requis), **session uniquement** |
 | `POST /api/login` | Échange un mot de passe contre un jeton de session |
 | `GET /manifest.json` | Manifest PWA ("Ajouter à l'écran d'accueil") |
@@ -215,23 +233,20 @@ de session) le permet.
   ne touche à rien côté GitHub/Dokploy.
 - Raccourcis clavier `/` (recherche) et `r` (rafraîchir) ; PWA installable
   (`/manifest.json`) ; thème clair/sombre manuel.
-- **Alerte navigateur sur nouvel échec** : favicon qui passe au rouge (remis
-  au normal dès que l'onglet reprend le focus) + notification navigateur si
-  autorisée (bouton 🔔, `Notification.requestPermission`). Volontairement
-  local au navigateur — pas de Slack/Discord/email, juste utile si l'onglet
-  reste ouvert en fond.
+- **Alerte navigateur sur nouvel échec** : favicon qui passe au rouge (si
+  l'onglet est en arrière-plan) + notification navigateur si autorisée
+  (bouton 🔔). Volontairement local au navigateur — pas de
+  Slack/Discord/email.
 
 **Relancer un déploiement échoué** — bouton **Relancer** (visible seulement
 en session mot de passe) déclenche `POST /api/application.deploy` côté
-Dokploy pour l'`applicationId` du déploiement. Fonctionne uniquement pour les
-déploiements créés après l'introduction de ce champ. Anti-spam : 1 relance /
-30 s par application.
+Dokploy pour l'`applicationId` du déploiement. Anti-spam : 1 relance / 30 s
+par application.
 
 **Panneau Configuration** (dépliable) — URL de webhook et header
-`x-webhook-secret` prêts à copier-coller dans Dokploy pour une nouvelle app
-(plus besoin de retourner dans ce README), avec un exemple `curl` complet
-pour tester manuellement. Derrière la session uniquement : le secret n'est
-jamais exposé sur une page publique.
+`x-webhook-secret` prêts à copier-coller dans Dokploy pour une nouvelle app,
+avec un exemple `curl` complet. Derrière la session uniquement : le secret
+n'est jamais exposé sur une page publique.
 
 **Panneau Sécurité** (dépliable)
 - **Rotation du mot de passe** (ancien requis, 8 caractères minimum). Sans
@@ -241,7 +256,7 @@ jamais exposé sur une page publique.
   et n'applique le changement que si cette écriture réussit.
 - **Journal d'audit** : connexions réussies/échouées, relances, changements
   de mot de passe, avec IP et horodatage (200 entrées max) — filtrable par
-  type, IP ou date (`GET /api/audit-log?type=...&ip=...&since=...`).
+  type, IP ou date.
 
 ## Persistance
 
@@ -269,13 +284,17 @@ d'inventer des données.
   caractères) ou sans moyen de résoudre les repos.
 - `owner`/`repo`/`branch`/identifiants validés par regex ; corps JSON ≤ 1 Mo ;
   timeout 10 s sur tous les appels sortants ; `x-powered-by` désactivé.
+- Rate-limit par IP sur `/webhook` et `/github` (60/min), en plus du secret
+  déjà requis.
 - Erreurs GitHub/Dokploy loggées côté serveur uniquement, jamais renvoyées
   au client.
-- Rate-limit par IP sur `/webhook` et `/github` (60/min), en plus du secret
-  déjà requis — un secret valide ne peut pas spammer sans limite.
 - `npm audit` : 0 vulnérabilité (Express 5, aucune autre dépendance).
 - À exposer uniquement en HTTPS ; secrets hors du dépôt (`.env` jamais
   commité).
+
+Une vulnérabilité à signaler ? Ouvre une issue GitHub en décrivant le
+problème sans détails d'exploitation publics si c'est sensible, ou contacte
+directement le mainteneur.
 
 ## Tests
 
@@ -336,6 +355,7 @@ store.js             historique persisté (JSON) des déploiements + stats
 audit-log.js         journal d'audit persisté (connexions, relances, mot de passe)
 mute.js              liste persistée des repos en mode maintenance
 auth.js              jetons de session/lien signés (HMAC), sans état serveur
+landing-page.js      page HTML de / (vitrine publique)
 deployment-page.js   page HTML de /deployments/:id (rendu + auth côté client)
 admin-page.js        page HTML de /deployments (tableau de bord)
 test/                tests unitaires (node:test) sur store.js et auth.js
@@ -345,10 +365,12 @@ Dockerfile           image de déploiement (node:20-alpine, avec HEALTHCHECK)
 ## Développement local
 
 ```bash
+git clone https://github.com/mv1234vm/dokploy-github-status.git
+cd dokploy-github-status
 npm install
 GITHUB_TOKEN=xxx \
 WEBHOOK_SECRET=0123456789abcdef0123 \
-GITHUB_OWNER=mv1234vm \
+GITHUB_OWNER=ton-compte-github \
 PUBLIC_URL=http://localhost:3000 \
 DASHBOARD_PASSWORD=devpassword \
 npm start
@@ -367,3 +389,17 @@ npm start
 | `/health` renvoie `"ok": false` | Sondage Dokploy en échec continu — vérifier `DOKPLOY_API_KEY`/`DOKPLOY_URL` |
 | Bouton "Relancer" en erreur | Déploiement sans `applicationId` (antérieur à cette fonctionnalité), ou API Dokploy changée — logs `[retry]` |
 | Rotation de mot de passe non permanente | `SELF_APPLICATION_ID` non configuré — le changement reste en mémoire jusqu'au prochain redéploiement |
+
+## Contribuer
+
+Les PR et issues sont bienvenues. Avant de proposer un changement :
+- `npm test` doit passer ;
+- pas de nouvelle dépendance sans bonne raison (c'est un choix assumé du
+  projet : Express seul, zéro base de données) ;
+- si tu touches à la logique du poller/webhook, explique le scénario de bug
+  visé dans la description de la PR — ce service a un historique de bugs
+  subtils sur la gestion des statuts "en cours" et des rattrapages.
+
+## Licence
+
+[MIT](LICENSE) — utilise, modifie, redistribue librement.

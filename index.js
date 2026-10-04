@@ -1083,7 +1083,16 @@ app.post("/api/change-password", async (req, res) => {
   }
   try {
     const currentEnv = await dokployGet(`/api/application.one?applicationId=${encodeURIComponent(SELF_APPLICATION_ID)}`);
-    const lines = String(currentEnv?.env || "")
+    // dokployGet() renvoie silencieusement null si DOKPLOY_API_KEY/dokployBase
+    // ne sont pas prêts (ex. DOKPLOY_URL absent et aucun webhook reçu depuis
+    // le dernier redémarrage) — sans ce garde-fou, currentEnv?.env vaudrait
+    // undefined et String(undefined) donnerait la ligne littérale
+    // "undefined", qui remplacerait alors TOUT l'environnement Dokploy
+    // (GITHUB_TOKEN, WEBHOOK_SECRET...) par une seule ligne invalide.
+    if (!currentEnv || typeof currentEnv.env !== "string") {
+      throw new Error("Impossible de lire l'environnement actuel depuis Dokploy (API indisponible ou URL Dokploy pas encore connue)");
+    }
+    const lines = currentEnv.env
       .split("\n")
       .filter((l) => l && !l.startsWith("DASHBOARD_PASSWORD="));
     lines.push(`DASHBOARD_PASSWORD=${newPassword}`);

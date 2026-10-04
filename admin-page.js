@@ -105,7 +105,7 @@ function renderAdminPage() {
   <div id="app" hidden>
     <div class="card">
       <div class="card-head">
-        <h1>Activité récente (tous sites)</h1>
+        <h1 id="timeline-title">Activité récente (tous sites)</h1>
       </div>
       <div id="timeline" class="timeline-strip"></div>
     </div>
@@ -358,7 +358,11 @@ function renderAdminPage() {
     health.forEach(function (r) { el.appendChild(rowFor(r, { withHealth: true })); });
   }
 
-  function renderTimeline(deployments) {
+  function renderTimeline(deployments, filtered) {
+    // Cette frise est construite à partir de la même page (filtrée/paginée)
+    // que la liste en dessous : si un filtre est actif, le titre doit le
+    // dire clairement plutôt que prétendre "tous sites" à tort.
+    $("#timeline-title").textContent = filtered ? "Activité récente (filtrée)" : "Activité récente (tous sites)";
     var el = $("#timeline");
     el.innerHTML = "";
     if (!deployments.length) { el.innerHTML = '<p class="note">Rien à afficher pour l\\'instant.</p>'; return; }
@@ -373,8 +377,14 @@ function renderAdminPage() {
 
   // reset=true : nouveau filtre/premier chargement, on repart de zéro.
   // reset=false : "Charger plus", on ajoute à la suite de ce qui est affiché.
+  // requestToken évite une course : si "Charger plus" et l'actualisation
+  // auto (8s) partent presque en même temps, seule la réponse à la DERNIÈRE
+  // requête lancée doit mettre à jour l'affichage, sinon une réponse arrivée
+  // en retard peut écraser un état plus récent (doublons, pagination cassée).
+  var requestToken = 0;
   function load(reset) {
     if (reset) currentOffset = 0;
+    var myToken = ++requestToken;
     var f = currentFilters();
     var params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(currentOffset) });
     if (f.status) params.set("status", f.status);
@@ -387,7 +397,7 @@ function renderAdminPage() {
         return res.json();
       })
       .then(function (data) {
-        if (!data) return;
+        if (!data || myToken !== requestToken) return;
         lastData = data;
         currentTotal = data.total;
         stats = data.stats || {};
@@ -397,7 +407,7 @@ function renderAdminPage() {
         if (reset) checkForNewFailures(data.health);
         renderHealth(data.health);
         renderList();
-        if (reset) renderTimeline(data.deployments);
+        if (reset) renderTimeline(data.deployments, !!(f.status || f.search));
         show($("#app"));
         hide($("#loading"));
         $("#logout").hidden = false;
@@ -531,7 +541,11 @@ function renderAdminPage() {
     hasFirstLoad = true;
 
     if (newFailures.length) {
-      setFaviconAlert(true);
+      // Si l'onglet est déjà au premier plan, l'échec est visible directement
+      // dans le tableau de bord : inutile d'allumer le favicon, qui ne serait
+      // de toute façon jamais éteint puisque "visibilitychange" ne se
+      // déclenche qu'en repassant par l'état caché.
+      if (document.hidden) setFaviconAlert(true);
       if (notificationsEnabled() && "Notification" in window && Notification.permission === "granted") {
         newFailures.forEach(function (r) {
           new Notification("Déploiement échoué", {

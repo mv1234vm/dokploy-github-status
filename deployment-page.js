@@ -236,6 +236,10 @@ function renderDeploymentPage() {
           .then(function (r) {
             retryBtn.disabled = false;
             retryBtn.textContent = r.ok ? "Relance déclenchée ✓" : (r.body.error || "Échec de la relance");
+            // Sans ça, la page reste affichée "Échoué" jusqu'à un rechargement
+            // manuel : le statut ne passera à "pending" qu'au prochain cycle
+            // du poller côté serveur, pas instantanément ici.
+            if (r.ok) setTimeout(load, 5000);
           })
           .catch(function () {
             retryBtn.disabled = false;

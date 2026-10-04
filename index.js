@@ -6,6 +6,7 @@ const mute = require("./mute");
 const { makeSigner } = require("./auth");
 const { renderDeploymentPage } = require("./deployment-page");
 const { renderAdminPage } = require("./admin-page");
+const { renderLandingPage } = require("./landing-page");
 
 const app = express();
 // On garde le corps brut pour vérifier la signature des webhooks GitHub
@@ -1197,20 +1198,7 @@ app.get("/manifest.json", (_req, res) => {
 });
 
 app.get("/", (_req, res) => {
-  res
-    .type("html")
-    .send(
-      `<!doctype html><meta charset="utf-8"><title>dokploy-github-status</title>` +
-        `<style>body{font:14px system-ui;margin:3rem auto;max-width:34rem;padding:0 1rem;color:#222}` +
-        `code{background:#f2f2f2;padding:.1em .3em;border-radius:3px}</style>` +
-        `<h1>dokploy-github-status</h1>` +
-        `<p>Service actif. Il met à jour les statuts de déploiement GitHub à partir des webhooks Dokploy.</p>` +
-        `<ul><li><code>POST /webhook</code> — notification Dokploy</li>` +
-        `<li><code>POST /github</code> — webhook GitHub push (statut « en cours »)</li>` +
-        `<li><code>GET /deployments/:id</code> — page de détail d'un déploiement</li>` +
-        `<li><code>GET /deployments</code> — liste + état de santé de tous les sites (mot de passe requis)</li>` +
-        `<li><code>GET /health</code></li></ul>`
-    );
+  res.type("html").send(renderLandingPage());
 });
 
 app.listen(PORT, () => {

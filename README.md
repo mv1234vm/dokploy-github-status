@@ -35,6 +35,7 @@ découvre lui-même le repo GitHub de chaque application Dokploy.
 - [Tableau de bord `/deployments`](#tableau-de-bord-deployments)
 - [Persistance](#persistance)
 - [Sécurité](#sécurité)
+- [Tests](#tests)
 - [Fiabilité](#fiabilité)
 - [Test manuel](#test-manuel)
 - [Structure du projet](#structure-du-projet)
@@ -214,12 +215,23 @@ de session) le permet.
   ne touche à rien côté GitHub/Dokploy.
 - Raccourcis clavier `/` (recherche) et `r` (rafraîchir) ; PWA installable
   (`/manifest.json`) ; thème clair/sombre manuel.
+- **Alerte navigateur sur nouvel échec** : favicon qui passe au rouge (remis
+  au normal dès que l'onglet reprend le focus) + notification navigateur si
+  autorisée (bouton 🔔, `Notification.requestPermission`). Volontairement
+  local au navigateur — pas de Slack/Discord/email, juste utile si l'onglet
+  reste ouvert en fond.
 
 **Relancer un déploiement échoué** — bouton **Relancer** (visible seulement
 en session mot de passe) déclenche `POST /api/application.deploy` côté
 Dokploy pour l'`applicationId` du déploiement. Fonctionne uniquement pour les
 déploiements créés après l'introduction de ce champ. Anti-spam : 1 relance /
 30 s par application.
+
+**Panneau Configuration** (dépliable) — URL de webhook et header
+`x-webhook-secret` prêts à copier-coller dans Dokploy pour une nouvelle app
+(plus besoin de retourner dans ce README), avec un exemple `curl` complet
+pour tester manuellement. Derrière la session uniquement : le secret n'est
+jamais exposé sur une page publique.
 
 **Panneau Sécurité** (dépliable)
 - **Rotation du mot de passe** (ancien requis, 8 caractères minimum). Sans
@@ -228,7 +240,8 @@ déploiements créés après l'introduction de ce champ. Anti-spam : 1 relance /
   service réécrit lui-même `DASHBOARD_PASSWORD` dans l'environnement Dokploy,
   et n'applique le changement que si cette écriture réussit.
 - **Journal d'audit** : connexions réussies/échouées, relances, changements
-  de mot de passe, avec IP et horodatage (200 entrées max).
+  de mot de passe, avec IP et horodatage (200 entrées max) — filtrable par
+  type, IP ou date (`GET /api/audit-log?type=...&ip=...&since=...`).
 
 ## Persistance
 
@@ -258,9 +271,23 @@ d'inventer des données.
   timeout 10 s sur tous les appels sortants ; `x-powered-by` désactivé.
 - Erreurs GitHub/Dokploy loggées côté serveur uniquement, jamais renvoyées
   au client.
+- Rate-limit par IP sur `/webhook` et `/github` (60/min), en plus du secret
+  déjà requis — un secret valide ne peut pas spammer sans limite.
 - `npm audit` : 0 vulnérabilité (Express 5, aucune autre dépendance).
 - À exposer uniquement en HTTPS ; secrets hors du dépôt (`.env` jamais
   commité).
+
+## Tests
+
+```bash
+npm test
+```
+
+Tests unitaires (`node:test`, aucune dépendance supplémentaire) sur
+`store.js` (persistance, filtres, stats, santé par repo) et `auth.js`
+(signature/vérification des jetons, expiration, falsification). Pas de
+tests d'intégration sur les routes HTTP — vérifiées manuellement via curl à
+chaque changement (voir [Test manuel](#test-manuel)).
 
 ## Fiabilité
 
@@ -307,7 +334,8 @@ mute.js              liste persistée des repos en mode maintenance
 auth.js              jetons de session/lien signés (HMAC), sans état serveur
 deployment-page.js   page HTML de /deployments/:id (rendu + auth côté client)
 admin-page.js        page HTML de /deployments (tableau de bord)
-Dockerfile           image de déploiement (node:20-alpine)
+test/                tests unitaires (node:test) sur store.js et auth.js
+Dockerfile           image de déploiement (node:20-alpine, avec HEALTHCHECK)
 ```
 
 ## Développement local

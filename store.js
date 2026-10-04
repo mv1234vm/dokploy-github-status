@@ -139,7 +139,11 @@ function latestByRepo() {
     if (!record) continue;
     const key = `${record.owner}/${record.repo}`;
     const current = map.get(key);
-    if (!current || record.updatedAt > current.updatedAt) map.set(key, record);
+    // >= (pas >) : à résolution milliseconde, deux événements peuvent
+    // partager le même updatedAt — on parcourt insertionOrder du plus
+    // ancien au plus récent, donc en cas d'égalité le dernier visité est
+    // bien le plus récent.
+    if (!current || record.updatedAt >= current.updatedAt) map.set(key, record);
   }
   return [...map.values()].sort((a, b) => (a.repo > b.repo ? 1 : -1));
 }
@@ -191,16 +195,18 @@ function statsByRepo() {
 // Sha du déploiement précédent pour le même repo (avant `record`), pour le
 // lien "Comparer les commits" sur la page de détail. null si c'est le plus
 // ancien connu pour ce repo, ou si son sha est identique (rien à comparer).
+// Utilise la position dans insertionOrder plutôt que createdAt : à
+// résolution milliseconde, deux créations peuvent partager le même
+// timestamp, ce qui casserait une comparaison purement chronologique.
 function previousSha(record) {
-  let found = null;
-  for (const id of insertionOrder) {
-    if (id === record.id) continue;
-    const r = records.get(id);
+  const idx = insertionOrder.indexOf(record.id);
+  if (idx === -1) return null;
+  for (let i = idx - 1; i >= 0; i--) {
+    const r = records.get(insertionOrder[i]);
     if (!r || r.owner !== record.owner || r.repo !== record.repo) continue;
-    if (r.createdAt >= record.createdAt) continue;
-    if (!found || r.createdAt > found.createdAt) found = r;
+    return r.sha !== record.sha ? r.sha : null;
   }
-  return found && found.sha !== record.sha ? found.sha : null;
+  return null;
 }
 
 module.exports = { create, update, get, list, latestByRepo, statsByRepo, previousSha };

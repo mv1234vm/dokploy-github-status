@@ -13,6 +13,7 @@ const STALE_MS = 30 * 24 * 60 * 60 * 1000; // 30 jours
 function renderAdminPage() {
   return `<title>Tous les sites</title>
 <link rel="manifest" href="/manifest.json">
+<link id="favicon" rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='45' fill='%23ea580c'/%3E%3C/svg%3E">
 <meta name="theme-color" content="#ea580c">
 <style>
   :root{color-scheme:light dark;--bg:#f7f7f8;--card:#fff;--text:#1a1a1a;--muted:#6b7280;--border:#e5e7eb;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
@@ -26,7 +27,8 @@ function renderAdminPage() {
   .top-nav a{color:var(--muted);text-decoration:none}
   .top-nav a:hover{text-decoration:underline}
   .top-nav .right{display:flex;align-items:center;gap:.5rem}
-  #logout,#theme-toggle,#export-json,#export-csv,#copy-link,#load-more{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:.35rem .7rem;font-size:.8rem;cursor:pointer;font-family:inherit}
+  #logout,#theme-toggle,#notif-toggle,#export-json,#export-csv,#copy-link,#load-more{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:.35rem .7rem;font-size:.8rem;cursor:pointer;font-family:inherit}
+  #notif-toggle.active{border-color:#ea580c;color:#ea580c}
   .pager{display:flex;align-items:center;justify-content:space-between;gap:.75rem;margin-top:.75rem}
   .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;margin-bottom:1rem}
   .card-head{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem;margin-bottom:.9rem}
@@ -71,12 +73,18 @@ function renderAdminPage() {
   .audit-row{display:flex;gap:.6rem;padding:.4rem 0;border-bottom:1px solid var(--border);font-size:.8rem}
   .audit-row:last-child{border-bottom:none}
   .audit-row time{color:var(--muted);white-space:nowrap;min-width:9rem}
-  #toggle-security{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:.3rem .6rem;font-size:.8rem;cursor:pointer;font-family:inherit}
+  #toggle-security,#toggle-config{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:.3rem .6rem;font-size:.8rem;cursor:pointer;font-family:inherit}
+  .config-row{display:flex;align-items:center;gap:.5rem;margin:.5rem 0}
+  .config-row code{flex:1;overflow-x:auto;white-space:nowrap;padding:.4rem .5rem;background:var(--bg);border:1px solid var(--border);border-radius:6px}
+  .config-row button,#copy-config-curl{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:.35rem .7rem;font-size:.8rem;cursor:pointer;font-family:inherit;white-space:nowrap}
+  .curl-block{white-space:pre-wrap;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:.75rem;font-size:.8rem;margin:.5rem 0;overflow-x:auto}
+  details summary{cursor:pointer}
 </style>
 <div class="wrap">
   <div class="top-nav">
     <a href="/">← Retour</a>
     <div class="right">
+      <button id="notif-toggle" title="Notifications navigateur sur nouvel échec">🔔</button>
       <button id="theme-toggle" title="Changer de thème">🌓</button>
       <button id="export-json">Export JSON</button>
       <button id="export-csv">Export CSV</button>
@@ -132,6 +140,29 @@ function renderAdminPage() {
 
     <div class="card">
       <div class="card-head">
+        <h1>Configuration</h1>
+        <button id="toggle-config" type="button">Afficher</button>
+      </div>
+      <div id="config-panel" hidden>
+        <p class="note">Webhook à configurer dans Dokploy pour une nouvelle app (Notifications → Add → Webhook) :</p>
+        <div class="config-row">
+          <code id="config-url">—</code>
+          <button id="copy-config-url" type="button">Copier l'URL</button>
+        </div>
+        <div class="config-row">
+          <code id="config-header">—</code>
+          <button id="copy-config-header" type="button">Copier le header</button>
+        </div>
+        <details>
+          <summary class="note">Exemple curl complet (test manuel)</summary>
+          <pre id="config-curl" class="mono curl-block"></pre>
+          <button id="copy-config-curl" type="button">Copier la commande</button>
+        </details>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
         <h1>Sécurité</h1>
         <button id="toggle-security" type="button">Afficher</button>
       </div>
@@ -145,6 +176,17 @@ function renderAdminPage() {
         <div id="pw-change-msg" class="note"></div>
 
         <h2>Journal d'audit</h2>
+        <div class="filters">
+          <select id="audit-type">
+            <option value="">Tous les types</option>
+            <option value="login_success">✅ Connexion réussie</option>
+            <option value="login_failure">❌ Connexion échouée</option>
+            <option value="retry">🔁 Relance</option>
+            <option value="password_change">🔑 Mot de passe changé</option>
+          </select>
+          <input id="audit-ip" type="text" placeholder="Filtrer par IP…" />
+          <input id="audit-since" type="date" title="Depuis cette date" />
+        </div>
         <div id="audit-log"></div>
       </div>
     </div>
@@ -352,6 +394,7 @@ function renderAdminPage() {
         mutedRepos = data.mutedRepos || [];
         loadedDeployments = reset ? data.deployments : loadedDeployments.concat(data.deployments);
         currentOffset = loadedDeployments.length;
+        if (reset) checkForNewFailures(data.health);
         renderHealth(data.health);
         renderList();
         if (reset) renderTimeline(data.deployments);
@@ -435,6 +478,75 @@ function renderAdminPage() {
     download("deployments.csv", lines.join("\\n"), "text/csv");
   });
 
+  // Alerte "nouvel échec" pendant que l'onglet est ouvert en fond : favicon
+  // rouge + notification navigateur si autorisée. Volontairement local au
+  // navigateur — pas de notification externe (Slack/Discord/email).
+  var FAVICON_NORMAL = $("#favicon").href;
+  var FAVICON_ALERT =
+    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='45' fill='%23dc2626'/%3E%3C/svg%3E";
+  var previousHealthStatus = null; // repoKey -> status, pour détecter les transitions
+  var hasFirstLoad = false;
+
+  function setFaviconAlert(on) {
+    $("#favicon").href = on ? FAVICON_ALERT : FAVICON_NORMAL;
+  }
+
+  function notificationsEnabled() {
+    try { return localStorage.getItem("dgs_notifications") === "1"; } catch (e) { return false; }
+  }
+
+  function updateNotifButton() {
+    $("#notif-toggle").className = notificationsEnabled() ? "active" : "";
+  }
+
+  $("#notif-toggle").addEventListener("click", function () {
+    if (notificationsEnabled()) {
+      try { localStorage.setItem("dgs_notifications", "0"); } catch (e) {}
+      updateNotifButton();
+      return;
+    }
+    if (!("Notification" in window)) {
+      alert("Ce navigateur ne supporte pas les notifications.");
+      return;
+    }
+    Notification.requestPermission().then(function (perm) {
+      if (perm === "granted") {
+        try { localStorage.setItem("dgs_notifications", "1"); } catch (e) {}
+      }
+      updateNotifButton();
+    });
+  });
+
+  function checkForNewFailures(health) {
+    var newFailures = [];
+    health.forEach(function (r) {
+      var key = r.owner + "/" + r.repo;
+      var wasFailing = previousHealthStatus && (previousHealthStatus[key] === "failure" || previousHealthStatus[key] === "error");
+      var isFailing = r.status === "failure" || r.status === "error";
+      if (isFailing && !wasFailing && hasFirstLoad) newFailures.push(r);
+    });
+    var nextStatus = {};
+    health.forEach(function (r) { nextStatus[r.owner + "/" + r.repo] = r.status; });
+    previousHealthStatus = nextStatus;
+    hasFirstLoad = true;
+
+    if (newFailures.length) {
+      setFaviconAlert(true);
+      if (notificationsEnabled() && "Notification" in window && Notification.permission === "granted") {
+        newFailures.forEach(function (r) {
+          new Notification("Déploiement échoué", {
+            body: r.owner + "/" + r.repo + " — " + (r.description || r.status),
+            icon: FAVICON_ALERT,
+          });
+        });
+      }
+    }
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) setFaviconAlert(false);
+  });
+
   function applyTheme(theme) {
     if (theme) document.documentElement.setAttribute("data-theme", theme);
     else document.documentElement.removeAttribute("data-theme");
@@ -514,11 +626,21 @@ function renderAdminPage() {
   }
 
   function loadAuditLog() {
-    fetch("/api/audit-log", { headers: authHeader() })
+    var params = new URLSearchParams();
+    if ($("#audit-type").value) params.set("type", $("#audit-type").value);
+    if ($("#audit-ip").value.trim()) params.set("ip", $("#audit-ip").value.trim());
+    if ($("#audit-since").value) params.set("since", $("#audit-since").value);
+    fetch("/api/audit-log?" + params.toString(), { headers: authHeader() })
       .then(function (res) { return res.ok ? res.json() : { entries: [] }; })
       .then(function (data) { renderAuditLog(data.entries || []); })
       .catch(function () {});
   }
+  $("#audit-type").addEventListener("change", loadAuditLog);
+  $("#audit-ip").addEventListener("input", function () {
+    if (searchDebounce) clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(loadAuditLog, 300);
+  });
+  $("#audit-since").addEventListener("change", loadAuditLog);
 
   $("#toggle-security").addEventListener("click", function () {
     var panel = $("#security-panel");
@@ -527,6 +649,41 @@ function renderAdminPage() {
     $("#toggle-security").textContent = willShow ? "Masquer" : "Afficher";
     if (willShow) loadAuditLog();
   });
+
+  function copyText(btn, text) {
+    var done = function () {
+      var original = btn.textContent;
+      btn.textContent = "✓ Copié";
+      setTimeout(function () { btn.textContent = original; }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(function () { prompt("À copier :", text); });
+    } else {
+      prompt("À copier :", text);
+    }
+  }
+
+  var webhookConfig = null;
+  $("#toggle-config").addEventListener("click", function () {
+    var panel = $("#config-panel");
+    var willShow = panel.hidden;
+    panel.hidden = !willShow;
+    $("#toggle-config").textContent = willShow ? "Masquer" : "Afficher";
+    if (willShow && !webhookConfig) {
+      fetch("/api/webhook-config", { headers: authHeader() })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          webhookConfig = data;
+          $("#config-url").textContent = data.webhookUrl;
+          $("#config-header").textContent = data.webhookSecretHeader;
+          $("#config-curl").textContent = data.curl;
+        })
+        .catch(function () {});
+    }
+  });
+  $("#copy-config-url").addEventListener("click", function () { if (webhookConfig) copyText(this, webhookConfig.webhookUrl); });
+  $("#copy-config-header").addEventListener("click", function () { if (webhookConfig) copyText(this, webhookConfig.webhookSecretHeader); });
+  $("#copy-config-curl").addEventListener("click", function () { if (webhookConfig) copyText(this, webhookConfig.curl); });
 
   $("#pw-change-submit").addEventListener("click", function () {
     var current = $("#pw-current").value;
@@ -569,6 +726,7 @@ function renderAdminPage() {
     }
   });
 
+  updateNotifButton();
   readFiltersFromUrl();
   show($("#loading"));
   load(true);

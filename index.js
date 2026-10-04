@@ -730,7 +730,27 @@ async function parsePayload(body = {}) {
 
 // ---------- Route ----------
 
+// Rate-limit par IP sur les deux endpoints webhook, en plus du secret déjà
+// requis : un secret valide ne doit quand même pas pouvoir spammer sans
+// limite (bug client, script qui boucle...). 60/min est largement au-dessus
+// du trafic légitime (quelques déploiements max en même temps).
+const webhookAttempts = new Map(); // ip -> { count, resetAt }
+const WEBHOOK_RATE_LIMIT = 60;
+function webhookThrottled(ip) {
+  const now = Date.now();
+  const entry = webhookAttempts.get(ip);
+  if (!entry || now > entry.resetAt) {
+    webhookAttempts.set(ip, { count: 1, resetAt: now + 60000 });
+    return false;
+  }
+  entry.count += 1;
+  return entry.count > WEBHOOK_RATE_LIMIT;
+}
+
 app.post("/webhook", async (req, res) => {
+  if (webhookThrottled(req.ip || "?")) {
+    return res.status(429).json({ error: "Trop de requêtes, réessaie dans une minute." });
+  }
   const secret = req.headers["x-webhook-secret"];
   if (!secret || !safeEqual(secret, WEBHOOK_SECRET)) {
     console.warn("[webhook] secret invalide -> 401");
@@ -792,6 +812,9 @@ app.post("/webhook", async (req, res) => {
 
 // Webhook GitHub "push" : pose le statut "en cours" dès le push (optionnel)
 app.post("/github", async (req, res) => {
+  if (webhookThrottled(req.ip || "?")) {
+    return res.status(429).json({ error: "Trop de requêtes, réessaie dans une minute." });
+  }
   if (!GITHUB_WEBHOOK_SECRET) return res.status(404).json({ error: "Non configuré" });
 
   const sig = req.headers["x-hub-signature-256"] || "";
@@ -985,11 +1008,39 @@ app.post("/api/deployments/:id/retry", async (req, res) => {
   }
 });
 
+const VALID_AUDIT_TYPES = new Set(["login_success", "login_failure", "retry", "password_change"]);
+
 app.get("/api/audit-log", (req, res) => {
   if (!isSessionAuthorized(req)) {
     return res.status(401).json({ error: "Authentification requise" });
   }
-  res.json({ entries: auditLog.list(100) });
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+  const type = VALID_AUDIT_TYPES.has(req.query.type) ? req.query.type : undefined;
+  const ip = typeof req.query.ip === "string" ? req.query.ip.slice(0, 64) : undefined;
+  const since = typeof req.query.since === "string" ? req.query.since.slice(0, 32) : undefined;
+  res.json({ entries: auditLog.list(limit, { type, ip, since }) });
+});
+
+// Volontairement derrière la session : WEBHOOK_SECRET ne doit jamais
+// apparaître sur une page publique (quelqu'un pourrait forger des webhooks).
+app.get("/api/webhook-config", (req, res) => {
+  if (!isSessionAuthorized(req)) {
+    return res.status(401).json({ error: "Authentification requise" });
+  }
+  const webhookUrl = PUBLIC_URL ? `${PUBLIC_URL}/webhook` : "https://<ton-domaine>/webhook";
+  const curl =
+    `curl -X POST ${webhookUrl} \\\n` +
+    `  -H "Content-Type: application/json" \\\n` +
+    `  -H "x-webhook-secret: ${WEBHOOK_SECRET}" \\\n` +
+    `  -d '{\n` +
+    `    "appName": "mon-app",\n` +
+    `    "status": "done",\n` +
+    `    "sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4",\n` +
+    `    "githubOwner": "mv1234vm",\n` +
+    `    "githubRepo": "mon-repo",\n` +
+    `    "appUrl": "https://mon-app.exemple.fr"\n` +
+    `  }'`;
+  res.json({ webhookUrl, webhookSecretHeader: `x-webhook-secret: ${WEBHOOK_SECRET}`, curl });
 });
 
 app.post("/api/change-password", async (req, res) => {

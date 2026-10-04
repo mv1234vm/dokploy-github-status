@@ -47,8 +47,14 @@ function record(type, details = {}) {
   persist();
 }
 
-function list(limit = 100) {
-  return entries.slice(-limit).reverse();
+// filters.type / filters.ip / filters.since (ISO date, inclus) s'appliquent
+// avant la limite, pour que "les 50 derniers échecs de connexion" ait un sens.
+function list(limit = 100, filters = {}) {
+  let all = entries.slice().reverse();
+  if (filters.type) all = all.filter((e) => e.type === filters.type);
+  if (filters.ip) all = all.filter((e) => e.ip === filters.ip);
+  if (filters.since) all = all.filter((e) => e.at >= filters.since);
+  return all.slice(0, limit);
 }
 
 module.exports = { record, list };

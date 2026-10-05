@@ -27,6 +27,15 @@ découvre lui-même le repo GitHub de chaque application Dokploy.
                           GET /deployments/:id  ← ce que "Details" ouvre
 ```
 
+<p align="center">
+  <img src="screenshots/dashboard.png" alt="Tableau de bord /deployments : activité récente, santé par site avec sparkline/taux de succès, liste filtrable des déploiements" width="100%">
+</p>
+<p align="center">
+  <img src="screenshots/detail-page.png" alt="Page de détail d'un déploiement : statut, infos, actions (comparer, relancer), timeline" width="100%">
+</p>
+
+*(Données de démo — capturées avec un historique fictif, aucune info réelle.)*
+
 ## Pourquoi
 
 Dokploy ne pose pas nativement de statut sur les commits GitHub — pas de

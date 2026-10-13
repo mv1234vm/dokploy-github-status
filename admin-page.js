@@ -36,7 +36,7 @@ function renderAdminPage() {
   .filters{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem}
   .filters input,.filters select{padding:.45rem .6rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:.85rem;font-family:inherit}
   .filters input{flex:1;min-width:10rem}
-  .row{display:flex;align-items:center;gap:.75rem;padding:.6rem 0;border-bottom:1px solid var(--border);font-size:.9rem}
+  .row{display:flex;align-items:center;flex-wrap:wrap;gap:.5rem .75rem;padding:.6rem 0;border-bottom:1px solid var(--border);font-size:.9rem}
   .row:last-child{border-bottom:none}
   .emoji{font-size:1.2rem;line-height:1}
   .row .name{font-weight:600}
@@ -84,19 +84,19 @@ function renderAdminPage() {
   <div class="top-nav">
     <a href="/">← Retour</a>
     <div class="right">
-      <button id="notif-toggle" title="Notifications navigateur sur nouvel échec">🔔</button>
-      <button id="theme-toggle" title="Changer de thème">🌓</button>
-      <button id="export-json">Export JSON</button>
-      <button id="export-csv">Export CSV</button>
-      <button id="logout" hidden>Se déconnecter</button>
+      <button id="notif-toggle" type="button" title="Notifications navigateur sur nouvel échec" aria-label="Activer les notifications">🔔</button>
+      <button id="theme-toggle" type="button" title="Changer de thème" aria-label="Changer de thème">🌓</button>
+      <button id="export-json" type="button">Export JSON</button>
+      <button id="export-csv" type="button">Export CSV</button>
+      <button id="logout" type="button" hidden>Se déconnecter</button>
     </div>
   </div>
 
   <div id="gate" class="center" hidden>
     <h1>🔒 Accès protégé</h1>
     <p class="note">Cette page est protégée par mot de passe.</p>
-    <input id="pw" type="password" placeholder="Mot de passe" autocomplete="current-password" />
-    <button id="pw-submit" class="primary">Accéder</button>
+    <input id="pw" type="password" placeholder="Mot de passe" aria-label="Mot de passe" autocomplete="current-password" />
+    <button id="pw-submit" type="button" class="primary">Accéder</button>
     <div id="pw-error" class="error-msg"></div>
   </div>
 
@@ -121,8 +121,8 @@ function renderAdminPage() {
         <h1>Derniers déploiements</h1>
       </div>
       <div class="filters">
-        <input id="f-search" type="text" placeholder="Filtrer par repo ou app… (touche /)" />
-        <select id="f-status">
+        <input id="f-search" type="text" placeholder="Filtrer par repo ou app… (touche /)" aria-label="Filtrer par repo ou app" />
+        <select id="f-status" aria-label="Filtrer par statut">
           <option value="">Tous les statuts</option>
           <option value="pending">🟠 En cours</option>
           <option value="success">🟢 Réussi</option>
@@ -169,23 +169,23 @@ function renderAdminPage() {
       <div id="security-panel" hidden>
         <h2>Changer le mot de passe</h2>
         <div class="pw-form">
-          <input id="pw-current" type="password" placeholder="Mot de passe actuel" autocomplete="current-password" />
-          <input id="pw-new" type="password" placeholder="Nouveau mot de passe (8+ caractères)" autocomplete="new-password" />
+          <input id="pw-current" type="password" placeholder="Mot de passe actuel" aria-label="Mot de passe actuel" autocomplete="current-password" />
+          <input id="pw-new" type="password" placeholder="Nouveau mot de passe (8+ caractères)" aria-label="Nouveau mot de passe" autocomplete="new-password" />
           <button id="pw-change-submit" type="button">Changer</button>
         </div>
         <div id="pw-change-msg" class="note"></div>
 
         <h2>Journal d'audit</h2>
         <div class="filters">
-          <select id="audit-type">
+          <select id="audit-type" aria-label="Filtrer par type d'événement">
             <option value="">Tous les types</option>
             <option value="login_success">✅ Connexion réussie</option>
             <option value="login_failure">❌ Connexion échouée</option>
             <option value="retry">🔁 Relance</option>
             <option value="password_change">🔑 Mot de passe changé</option>
           </select>
-          <input id="audit-ip" type="text" placeholder="Filtrer par IP…" />
-          <input id="audit-since" type="date" title="Depuis cette date" />
+          <input id="audit-ip" type="text" placeholder="Filtrer par IP…" aria-label="Filtrer par IP" />
+          <input id="audit-since" type="date" title="Depuis cette date" aria-label="Depuis cette date" />
         </div>
         <div id="audit-log"></div>
       </div>
@@ -202,7 +202,6 @@ function renderAdminPage() {
   var show = function (el) { el.hidden = false; };
   var hide = function (el) { el.hidden = true; };
   var PAGE_SIZE = 50;
-  var lastData = null;
   var refreshTimer = null;
   var loadedDeployments = [];
   var currentOffset = 0;
@@ -398,7 +397,6 @@ function renderAdminPage() {
       })
       .then(function (data) {
         if (!data || myToken !== requestToken) return;
-        lastData = data;
         currentTotal = data.total;
         stats = data.stats || {};
         mutedRepos = data.mutedRepos || [];
@@ -429,14 +427,14 @@ function renderAdminPage() {
     show($("#gate"));
   }
 
-  var searchDebounce = null;
+  var filterSearchDebounce = null;
   function onFilterChange() {
     syncUrl();
     load(true);
   }
   $("#f-search").addEventListener("input", function () {
-    if (searchDebounce) clearTimeout(searchDebounce);
-    searchDebounce = setTimeout(onFilterChange, 300);
+    if (filterSearchDebounce) clearTimeout(filterSearchDebounce);
+    filterSearchDebounce = setTimeout(onFilterChange, 300);
   });
   $("#f-status").addEventListener("change", onFilterChange);
 
@@ -444,18 +442,7 @@ function renderAdminPage() {
 
   $("#copy-link").addEventListener("click", function () {
     syncUrl();
-    var url = location.href;
-    var done = function () {
-      var btn = $("#copy-link");
-      var original = btn.textContent;
-      btn.textContent = "✓ Copié";
-      setTimeout(function () { btn.textContent = original; }, 1500);
-    };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(url).then(done).catch(function () { prompt("Lien à copier :", url); });
-    } else {
-      prompt("Lien à copier :", url);
-    }
+    copyText(this, location.href);
   });
 
   function download(filename, content, mime) {
@@ -632,9 +619,18 @@ function renderAdminPage() {
     entries.forEach(function (e) {
       var row = document.createElement("div");
       row.className = "audit-row";
-      var extra = e.repo ? " — " + e.owner + "/" + e.repo : "";
-      row.innerHTML =
-        "<time>" + fmtDate(e.at) + "</time><span>" + (LABELS[e.type] || e.type) + extra + (e.ip ? " (" + e.ip + ")" : "") + "</span>";
+      var time = document.createElement("time");
+      time.textContent = fmtDate(e.at);
+      var label = (LABELS[e.type] || e.type) +
+        (e.repo ? " — " + e.owner + "/" + e.repo : "") +
+        (e.ip ? " (" + e.ip + ")" : "");
+      var span = document.createElement("span");
+      // textContent (pas innerHTML) : e.ip vient de req.ip, qui peut refléter
+      // un en-tête X-Forwarded-For fourni par l'appelant (trust proxy actif)
+      // — ne jamais l'interpréter comme du HTML.
+      span.textContent = label;
+      row.appendChild(time);
+      row.appendChild(span);
       el.appendChild(row);
     });
   }
@@ -649,10 +645,11 @@ function renderAdminPage() {
       .then(function (data) { renderAuditLog(data.entries || []); })
       .catch(function () {});
   }
+  var auditIpDebounce = null;
   $("#audit-type").addEventListener("change", loadAuditLog);
   $("#audit-ip").addEventListener("input", function () {
-    if (searchDebounce) clearTimeout(searchDebounce);
-    searchDebounce = setTimeout(loadAuditLog, 300);
+    if (auditIpDebounce) clearTimeout(auditIpDebounce);
+    auditIpDebounce = setTimeout(loadAuditLog, 300);
   });
   $("#audit-since").addEventListener("change", loadAuditLog);
 

@@ -61,17 +61,17 @@ function renderDeploymentPage() {
   <div class="top-nav">
     <a href="/">← Retour</a>
     <span class="nav-actions">
-      <button id="theme-toggle" title="Changer de thème">🌓</button>
+      <button id="theme-toggle" type="button" title="Changer de thème" aria-label="Changer de thème">🌓</button>
       <a id="admin-link" href="/deployments" hidden>Tous les sites</a>
-      <button id="logout" hidden>Se déconnecter</button>
+      <button id="logout" type="button" hidden>Se déconnecter</button>
     </span>
   </div>
 
   <div id="gate" class="center" hidden>
     <h1>🔒 Accès protégé</h1>
     <p class="note">Cette page de déploiement est protégée. Entrez le mot de passe pour continuer.</p>
-    <input id="pw" type="password" placeholder="Mot de passe" autocomplete="current-password" />
-    <button id="pw-submit" class="primary">Accéder au déploiement</button>
+    <input id="pw" type="password" placeholder="Mot de passe" aria-label="Mot de passe" autocomplete="current-password" />
+    <button id="pw-submit" type="button" class="primary">Accéder au déploiement</button>
     <div id="pw-error" class="error-msg"></div>
   </div>
 

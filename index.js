@@ -147,7 +147,7 @@ function withTimeout(ms) {
   return { signal: c.signal, done: () => clearTimeout(t) };
 }
 
-// ---------- GitHub ----------
+// GitHub API
 
 function githubHeaders() {
   return {
@@ -182,10 +182,8 @@ async function githubFetchOnce(url, options) {
   return data;
 }
 
-// Bug 2 (statuts manquants) : un aléa réseau/5xx ponctuel ne doit pas suffire à
-// perdre un statut définitivement. 2 tentatives supplémentaires, backoff court.
-// Jamais de retry sur une erreur 4xx (permissions, payload invalide) : ça ne
-// changera pas de résultat, autant échouer vite et le voir dans les logs.
+// Réessaie sur erreur réseau/5xx (2 tentatives, backoff court) — jamais sur
+// un 4xx, qui ne changera pas de résultat au second essai.
 async function githubFetch(url, options = {}, attempt = 0) {
   try {
     return await githubFetchOnce(url, options);
@@ -326,14 +324,11 @@ function fireOutgoingWebhook(payload) {
     .finally(to.done);
 }
 
-// Bug 1 (pending qui ne se referment jamais) : Dokploy ne déploie que le
-// dernier commit poussé sur la branche. Si un commit B arrive pendant que le
-// pending de A tourne encore, A est court-circuité et son rond orange ne
-// bougera plus jamais tout seul. On mémorise donc, par repo, le dernier
-// pending posé par ce service (sha + id du GitHub Deployment associé) ; dès
-// qu'un sha différent doit passer en pending (ou que le déploiement se
-// termine), on referme l'ancien — commit status ET deployment status, pour
-// ne pas laisser un objet Deployment bloqué "in_progress" sur GitHub.
+// Dokploy ne déploie que le dernier commit poussé sur une branche : si un
+// commit B arrive pendant que le pending de A tourne encore, A est
+// court-circuité et resterait bloqué en pending indéfiniment. On mémorise
+// donc le dernier pending par repo pour le refermer dès qu'un autre sha
+// prend sa place ou que le déploiement se termine.
 const pendingByRepo = new Map(); // "owner/repo" -> { sha, deploymentId }
 
 async function closeStalePending(owner, repo, keepSha) {
@@ -370,7 +365,7 @@ async function closeStalePending(owner, repo, keepSha) {
   pendingByRepo.delete(key);
 }
 
-// ---------- Résolution du repo ----------
+// Résolution du repo GitHub d'une app Dokploy
 
 function parseGitUrl(gitUrl) {
   if (!gitUrl) return null;
@@ -484,7 +479,7 @@ function resolveViaConfig(appName) {
   return null;
 }
 
-// ---------- Surveillance auto de Dokploy (statut "en cours") ----------
+// Sondage périodique de Dokploy (statut "en cours" + rattrapage)
 
 const POLL_ENABLED = (process.env.POLL || "on").toLowerCase() !== "off";
 const POLL_INTERVAL_MS = Math.max(
@@ -513,13 +508,10 @@ async function getAppRepo(applicationId) {
       `/api/application.one?applicationId=${encodeURIComponent(applicationId)}`
     );
     const repo = repoFromApp(a);
-    // On ne met en cache QUE les résolutions réussies (y compris "cette app
-    // n'est pas une app git" -> repo=null mais appel réussi). Un échec
-    // réseau/API transitoire (ex. juste après un redémarrage, pendant que
-    // Dokploy est momentanément indisponible) ne doit jamais blacklister
-    // l'app pour le reste de la vie du conteneur — sinon un déploiement de
-    // cette app précise reste bloqué en pending pour toujours, le poller ne
-    // la revoyant plus jamais tant qu'il n'est pas lui-même redéployé.
+    // Seule une résolution réussie est mise en cache (y compris un repo=null
+    // légitime, pour une app qui n'est pas liée à un repo git). Un échec
+    // réseau/API transitoire ne doit jamais blacklister l'app à vie : elle
+    // serait sinon ignorée par le poller jusqu'au prochain redémarrage.
     appRepoCache.set(applicationId, repo);
     return repo;
   } catch (err) {
@@ -628,19 +620,13 @@ async function pollOnce() {
       continue;
     }
 
-    // Bug 2 (statuts manquants) : filet de rattrapage. Si le webhook Dokploy
-    // n'a jamais atteint ce service pour ce déploiement (down, retry réseau
-    // épuisé, etc.), on pose ici le statut final a posteriori — idempotent
-    // par deploymentId, donc sans risque de doublon avec un webhook qui a
-    // bien fonctionné.
+    // Filet de rattrapage : si le webhook Dokploy n'a jamais atteint ce
+    // service pour ce déploiement, on pose le statut final a posteriori.
     if (status === "done" || status === "error") {
       if (seenFinal.get(id) === latest.deploymentId) continue;
-      // Après un redémarrage du service, sa mémoire est vide : sans ce
-      // garde-fou, TOUS les derniers déploiements de TOUTES les apps
-      // paraîtraient "jamais vus" et se feraient reposter d'un coup, même
-      // des commits vieux de plusieurs jours déjà correctement traités
-      // avant le redémarrage. On ne rattrape que ce qui s'est réellement
-      // terminé récemment.
+      // Un redémarrage vide la mémoire du service : sans cette fenêtre, tout
+      // l'historique récent de chaque app serait reposté d'un coup. On ne
+      // rattrape que ce qui s'est réellement terminé il y a peu.
       const finishedAt = new Date(
         latest.finishedAt || latest.startedAt || latest.createdAt || 0
       ).getTime();
@@ -648,15 +634,11 @@ async function pollOnce() {
         seenFinal.set(id, latest.deploymentId);
         continue;
       }
-      // On a vu ce déploiement passer par "running" via ce même service : le
-      // webhook Dokploy va probablement poser le statut final lui-même dans
-      // la seconde — on lui laisse une courte fenêtre pour éviter de
-      // double-poster dans le cas normal où tout fonctionne. Mais passé ce
-      // délai, on pose quand même : un webhook qui échoue (notification
-      // perdue, secret désynchronisé...) ne doit JAMAIS laisser un
-      // déploiement bloqué en pending indéfiniment — c'était le bug exact de
-      // l'ancienne version de ce garde-fou (déploiement resté "en cours"
-      // plus d'une heure alors que Dokploy l'affichait déjà "done").
+      // Si ce service a vu le déploiement passer par "running", le webhook
+      // Dokploy va normalement poser lui-même le statut final dans la
+      // seconde — on lui laisse cette fenêtre pour éviter un double post.
+      // Passé ce délai, on pose quand même : un webhook qui échoue ne doit
+      // jamais laisser un déploiement bloqué en pending indéfiniment.
       const WEBHOOK_GRACE_MS = 90 * 1000;
       if (
         seenDeployments.get(id) === latest.deploymentId &&
@@ -699,7 +681,7 @@ function startPoller() {
   setInterval(tick, POLL_INTERVAL_MS).unref();
 }
 
-// ---------- Normalisation du payload ----------
+// Normalisation du payload webhook
 
 function readStatus(body) {
   const raw = String(body.status || body.type || "").toLowerCase();
@@ -750,12 +732,10 @@ async function parsePayload(body = {}) {
   };
 }
 
-// ---------- Route ----------
+// Routes
 
 // Rate-limit par IP sur les deux endpoints webhook, en plus du secret déjà
-// requis : un secret valide ne doit quand même pas pouvoir spammer sans
-// limite (bug client, script qui boucle...). 60/min est largement au-dessus
-// du trafic légitime (quelques déploiements max en même temps).
+// requis : un secret valide ne doit pas pouvoir spammer sans limite.
 const webhookAttempts = new Map(); // ip -> { count, resetAt }
 const WEBHOOK_RATE_LIMIT = 60;
 function webhookThrottled(ip) {
@@ -886,7 +866,7 @@ app.post("/github", async (req, res) => {
   }
 });
 
-// ---------- Pages de détail des déploiements ----------
+// Pages de détail des déploiements
 
 // Garde-fou anti brute-force sur le mot de passe : 5 essais/minute par IP.
 // Volontairement simple (mémoire, pas de dépendance) — suffisant pour une
@@ -1092,12 +1072,9 @@ app.post("/api/change-password", async (req, res) => {
   }
   try {
     const currentEnv = await dokployGet(`/api/application.one?applicationId=${encodeURIComponent(SELF_APPLICATION_ID)}`);
-    // dokployGet() renvoie silencieusement null si DOKPLOY_API_KEY/dokployBase
-    // ne sont pas prêts (ex. DOKPLOY_URL absent et aucun webhook reçu depuis
-    // le dernier redémarrage) — sans ce garde-fou, currentEnv?.env vaudrait
-    // undefined et String(undefined) donnerait la ligne littérale
-    // "undefined", qui remplacerait alors TOUT l'environnement Dokploy
-    // (GITHUB_TOKEN, WEBHOOK_SECRET...) par une seule ligne invalide.
+    // dokployGet() renvoie null si DOKPLOY_API_KEY/dokployBase ne sont pas
+    // prêts : sans ce garde-fou on écrirait la ligne littérale "undefined"
+    // comme environnement complet, effaçant GITHUB_TOKEN/WEBHOOK_SECRET.
     if (!currentEnv || typeof currentEnv.env !== "string") {
       throw new Error("Impossible de lire l'environnement actuel depuis Dokploy (API indisponible ou URL Dokploy pas encore connue)");
     }

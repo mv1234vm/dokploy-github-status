@@ -24,6 +24,7 @@ function renderDeploymentPage() {
   a{color:inherit}
   .wrap{max-width:760px;margin:0 auto;padding:1.5rem 1rem}
   .top-nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem;font-size:.9rem}
+  .top-nav .nav-actions{display:flex;gap:.5rem;align-items:center}
   .top-nav a{color:var(--muted);text-decoration:none}
   .top-nav a:hover{text-decoration:underline}
   #logout,#theme-toggle{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:.35rem .7rem;font-size:.8rem;cursor:pointer;font-family:inherit}
@@ -59,7 +60,7 @@ function renderDeploymentPage() {
 <div class="wrap">
   <div class="top-nav">
     <a href="/">← Retour</a>
-    <span style="display:flex;gap:.5rem;align-items:center">
+    <span class="nav-actions">
       <button id="theme-toggle" title="Changer de thème">🌓</button>
       <a id="admin-link" href="/deployments" hidden>Tous les sites</a>
       <button id="logout" hidden>Se déconnecter</button>

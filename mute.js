@@ -2,40 +2,15 @@
 // échecs comme une alerte sur la page santé (badge neutre à la place),
 // utile pendant un chantier volontaire pour éviter le bruit visuel. Ne
 // touche à rien côté GitHub/Dokploy — purement cosmétique côté /deployments.
-const fs = require("fs");
 const path = require("path");
+const { readJson, makeDebouncedWriter } = require("./json-file");
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const DATA_FILE = path.join(DATA_DIR, "muted-repos.json");
 
-let muted = new Set();
+const muted = new Set(readJson(DATA_FILE, []));
 
-function loadFromDisk() {
-  try {
-    const raw = fs.readFileSync(DATA_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) muted = new Set(parsed);
-  } catch (err) {
-    if (err.code !== "ENOENT") {
-      console.warn(`[mute] lecture de ${DATA_FILE} impossible (${err.message}), on repart à vide`);
-    }
-  }
-}
-
-function persist() {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(DATA_FILE, JSON.stringify([...muted]), "utf8");
-  } catch (err) {
-    console.warn(`[mute] écriture de ${DATA_FILE} impossible : ${err.message}`);
-  }
-}
-
-loadFromDisk();
-
-function isMuted(key) {
-  return muted.has(key);
-}
+const persist = makeDebouncedWriter("mute", DATA_DIR, DATA_FILE, () => [...muted]);
 
 function toggle(key) {
   if (muted.has(key)) muted.delete(key);
@@ -48,4 +23,4 @@ function list() {
   return [...muted];
 }
 
-module.exports = { isMuted, toggle, list };
+module.exports = { toggle, list };

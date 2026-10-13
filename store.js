@@ -175,4 +175,4 @@ function previousSha(record) {
   return null;
 }
 
-module.exports = { create, update, get, list, latestByRepo, statsByRepo, previousSha };
+module.exports = { create, update, get, list, latestByRepo, statsByRepo, previousSha, flush: persist.flush };

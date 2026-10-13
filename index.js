@@ -1190,3 +1190,17 @@ app.listen(PORT, () => {
   console.log(`dokploy-github-status en écoute sur le port ${PORT}`);
   startPoller(); // démarre si DOKPLOY_URL est connu ; sinon au 1er webhook reçu
 });
+
+// Les écritures sur disque (store, audit-log, mute) sont debounced via
+// setImmediate : sans ce flush, un SIGTERM (arrêt normal du conteneur par
+// Docker à chaque redéploiement) peut couper le process avant la toute
+// dernière écriture et perdre le changement le plus récent.
+function shutdown(signal) {
+  console.log(`[server] ${signal} reçu, sauvegarde avant arrêt`);
+  store.flush();
+  auditLog.flush();
+  mute.flush();
+  process.exit(0);
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));

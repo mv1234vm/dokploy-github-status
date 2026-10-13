@@ -23,4 +23,4 @@ function list() {
   return [...muted];
 }
 
-module.exports = { toggle, list };
+module.exports = { toggle, list, flush: persist.flush };

@@ -17,19 +17,27 @@ function readJson(file, fallback) {
 
 function makeDebouncedWriter(label, dir, file, getData) {
   let scheduled = false;
-  return function schedule() {
+
+  function writeNow() {
+    scheduled = false;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(file, JSON.stringify(getData()), "utf8");
+    } catch (err) {
+      console.warn(`[${label}] écriture de ${file} impossible : ${err.message}`);
+    }
+  }
+
+  function schedule() {
     if (scheduled) return;
     scheduled = true;
-    setImmediate(() => {
-      scheduled = false;
-      try {
-        fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(file, JSON.stringify(getData()), "utf8");
-      } catch (err) {
-        console.warn(`[${label}] écriture de ${file} impossible : ${err.message}`);
-      }
-    });
-  };
+    setImmediate(writeNow);
+  }
+  // Écriture synchrone immédiate : à utiliser sur SIGTERM/SIGINT pour ne pas
+  // perdre le dernier changement resté dans la fenêtre de debounce quand le
+  // conteneur s'arrête (ça nous est déjà arrivé en pratique).
+  schedule.flush = writeNow;
+  return schedule;
 }
 
 module.exports = { readJson, makeDebouncedWriter };

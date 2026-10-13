@@ -30,4 +30,4 @@ function list(limit = 100, filters = {}) {
   return all.slice(0, limit);
 }
 
-module.exports = { record, list };
+module.exports = { record, list, flush: persist.flush };

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dokploy-github-status</title>
+<meta name="theme-color" content="#ea580c">
+<link rel="stylesheet" href="/landing.css">
+</head>
+<body>
+<div class="wrap">
+  <span class="badge"><span class="dot"></span>Service actif</span>
+  <h1>dokploy-github-status</h1>
+  <p class="lead">Relie Dokploy et GitHub : chaque déploiement pose sur le commit la pastille ✅ 🟠 ❌ native de GitHub, avec une page de détail dédiée et un tableau de bord santé pour tous les sites.</p>
+  <a class="cta" href="/deployments">Ouvrir le tableau de bord →</a>
+
+  <h2>Routes</h2>
+  <div class="card">
+    <div class="route"><span class="method">POST</span><span class="path">/webhook</span><span class="desc">Notification Dokploy (fin de déploiement)</span></div>
+    <div class="route"><span class="method">POST</span><span class="path">/github</span><span class="desc">Webhook GitHub push, statut « en cours » instantané</span></div>
+    <div class="route"><span class="method">GET</span><span class="path">/deployments/:id</span><span class="desc">Page de détail d'un déploiement</span></div>
+    <div class="route"><span class="method">GET</span><span class="path">/deployments</span><span class="desc">Tableau de bord — mot de passe requis</span></div>
+    <div class="route"><span class="method">GET</span><span class="path">/health</span><span class="desc">Disponibilité + état du sondage Dokploy</span></div>
+  </div>
+
+  <p class="footer"><a href="https://github.com/mv1234vm/dokploy-github-status" target="_blank" rel="noopener noreferrer">Code source sur GitHub</a></p>
+</div>
+</body>
+</html>

@@ -1,12 +1,10 @@
 const crypto = require("crypto");
+const path = require("path");
 const express = require("express");
 const store = require("./store");
 const auditLog = require("./audit-log");
 const mute = require("./mute");
 const { makeSigner } = require("./auth");
-const { renderDeploymentPage } = require("./deployment-page");
-const { renderAdminPage } = require("./admin-page");
-const { renderLandingPage } = require("./landing-page");
 
 const app = express();
 app.use(
@@ -19,6 +17,7 @@ app.use(
 );
 app.disable("x-powered-by");
 app.set("trust proxy", true);
+app.use(express.static(path.join(__dirname, "public")));
 
 const PORT = 3000;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
@@ -828,7 +827,7 @@ app.get("/api/deployments/:id", (req, res) => {
 });
 
 app.get("/deployments/:id", (_req, res) => {
-  res.type("html").send(renderDeploymentPage());
+  res.sendFile(path.join(__dirname, "views", "deployment.html"));
 });
 
 const VALID_STATUSES = new Set(["pending", "success", "failure", "error"]);
@@ -984,7 +983,7 @@ app.post("/api/repos/:owner/:repo/mute", (req, res) => {
 });
 
 app.get("/deployments", (_req, res) => {
-  res.type("html").send(renderAdminPage());
+  res.sendFile(path.join(__dirname, "views", "admin.html"));
 });
 
 app.get("/health", (_req, res) =>
@@ -1025,30 +1024,8 @@ app.get("/debug-poll", async (req, res) => {
   res.type("application/json").send(JSON.stringify(out, null, 2));
 });
 
-app.get("/manifest.json", (_req, res) => {
-  res.json({
-    name: "dokploy-github-status",
-    short_name: "Déploiements",
-    start_url: "/deployments",
-    display: "standalone",
-    background_color: "#f7f7f8",
-    theme_color: "#ea580c",
-    icons: [
-      {
-        src:
-          "data:image/svg+xml," +
-          encodeURIComponent(
-            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="20" fill="#ea580c"/><text x="50" y="66" font-size="56" text-anchor="middle" font-family="system-ui">🚀</text></svg>'
-          ),
-        sizes: "any",
-        type: "image/svg+xml",
-      },
-    ],
-  });
-});
-
 app.get("/", (_req, res) => {
-  res.type("html").send(renderLandingPage());
+  res.sendFile(path.join(__dirname, "views", "landing.html"));
 });
 
 app.listen(PORT, () => {

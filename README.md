@@ -407,12 +407,15 @@ store.js             historique persisté (JSON) des déploiements + stats
 audit-log.js         journal d'audit persisté (connexions, relances, mot de passe)
 mute.js              liste persistée des repos en mode maintenance
 auth.js              jetons de session/lien signés (HMAC), sans état serveur
-landing-page.js      page HTML de / (vitrine publique)
-deployment-page.js   page HTML de /deployments/:id (rendu + auth côté client)
-admin-page.js        page HTML de /deployments (tableau de bord)
-test/                tests unitaires (node:test) sur store.js et auth.js
+views/               pages HTML servies (landing, admin, deployment)
+public/              CSS, JS client et manifest.json servis en statique
+test/                tests unitaires (node:test) sur store.js, auth.js, json-file.js
 Dockerfile           image de déploiement (node:20-alpine, avec HEALTHCHECK)
 ```
+
+Chaque page a son HTML (`views/`), sa feuille de style et son script dédiés
+(`public/`) — aucun gabarit JS ne génère de HTML ou de CSS en les concaténant
+dans des chaînes de caractères.
 
 ## Développement local
 

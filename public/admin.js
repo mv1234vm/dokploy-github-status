@@ -1,196 +1,7 @@
-const { STATUS_META } = require("./deployment-page");
-
-const REFRESH_MS = 8000;
-const STALE_MS = 30 * 24 * 60 * 60 * 1000;
-
-function renderAdminPage() {
-  return `<title>Tous les sites</title>
-<link rel="manifest" href="/manifest.json">
-<link id="favicon" rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='45' fill='%23ea580c'/%3E%3C/svg%3E">
-<meta name="theme-color" content="#ea580c">
-<style>
-  :root{color-scheme:light dark;--bg:#f7f7f8;--card:#fff;--text:#1a1a1a;--muted:#6b7280;--border:#e5e7eb;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#111214;--card:#1b1c1f;--text:#f0f0f0;--muted:#9aa0a6;--border:#2c2d31}}
-  :root[data-theme="dark"]{--bg:#111214;--card:#1b1c1f;--text:#f0f0f0;--muted:#9aa0a6;--border:#2c2d31}
-  *{box-sizing:border-box}
-  body{background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:0 0 4rem}
-  a{color:inherit}
-  .wrap{max-width:900px;margin:0 auto;padding:1.5rem 1rem}
-  .top-nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem;font-size:.9rem;gap:.75rem}
-  .top-nav a{color:var(--muted);text-decoration:none}
-  .top-nav a:hover{text-decoration:underline}
-  .top-nav .right{display:flex;align-items:center;gap:.5rem}
-  #logout,#theme-toggle,#notif-toggle,#export-json,#export-csv,#copy-link,#load-more{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:.35rem .7rem;font-size:.8rem;cursor:pointer;font-family:inherit}
-  #notif-toggle.active{border-color:#ea580c;color:#ea580c}
-  .pager{display:flex;align-items:center;justify-content:space-between;gap:.75rem;margin-top:.75rem}
-  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;margin-bottom:1rem}
-  .card-head{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem;margin-bottom:.9rem}
-  h1{font-size:1.1rem;margin:0}
-  .filters{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem}
-  .filters input,.filters select{padding:.45rem .6rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:.85rem;font-family:inherit}
-  .filters input{flex:1;min-width:10rem}
-  .row{display:flex;align-items:center;flex-wrap:wrap;gap:.5rem .75rem;padding:.6rem 0;border-bottom:1px solid var(--border);font-size:.9rem}
-  .row:last-child{border-bottom:none}
-  .emoji{font-size:1.2rem;line-height:1}
-  .row .name{font-weight:600}
-  .row .sub{color:var(--muted);font-size:.8rem}
-  .row .age{margin-left:auto;font-size:.75rem;color:var(--muted);white-space:nowrap}
-  .row .age.stale{color:#ea580c}
-  .row a.detail{font-size:.8rem;color:var(--muted);text-decoration:underline;white-space:nowrap}
-  code,.mono{font-family:var(--mono);font-size:.85em}
-  .note{color:var(--muted);font-size:.85rem}
-  .center{max-width:380px;margin:4rem auto;text-align:center}
-  input[type=password]{width:100%;padding:.65rem .8rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:1rem;margin:.75rem 0}
-  button.primary{width:100%;padding:.7rem;border:none;border-radius:8px;background:#ea580c;color:#fff;font-size:1rem;cursor:pointer}
-  button.primary:disabled{opacity:.6;cursor:default}
-  .error-msg{color:#dc2626;font-size:.85rem;min-height:1.2em;margin-top:.4rem}
-  .refresh-note{color:var(--muted);font-size:.75rem}
-  kbd{font-family:var(--mono);font-size:.75em;background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:0 .3em}
-  .timeline-strip{display:flex;gap:3px;flex-wrap:wrap;align-items:center}
-  .timeline-strip span{width:10px;height:10px;border-radius:50%;display:inline-block;cursor:default}
-  .stats{display:flex;align-items:center;gap:.6rem;margin-left:.5rem}
-  .sparkline{display:block}
-  .success-rate{font-size:.72rem;font-weight:600;white-space:nowrap}
-  .success-rate.good{color:#16a34a}
-  .success-rate.bad{color:#dc2626}
-  .success-rate.mid{color:#ea580c}
-  .avg-duration{font-size:.7rem;color:var(--muted);white-space:nowrap}
-  .avg-duration.slow{color:#dc2626;font-weight:600}
-  .mute-btn{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:.2rem .5rem;font-size:.72rem;cursor:pointer;font-family:inherit;white-space:nowrap}
-  .mute-btn.active{border-color:#ea580c;color:#ea580c}
-  .row.muted{opacity:.55}
-  .pw-form{display:flex;flex-wrap:wrap;gap:.5rem;margin:.5rem 0 1rem}
-  .pw-form input{flex:1;min-width:12rem;padding:.5rem .6rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:.85rem}
-  .pw-form button{padding:.5rem 1rem;border:none;border-radius:6px;background:#ea580c;color:#fff;font-size:.85rem;cursor:pointer}
-  h2{font-size:.85rem;margin:1rem 0 .3rem;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
-  .audit-row{display:flex;gap:.6rem;padding:.4rem 0;border-bottom:1px solid var(--border);font-size:.8rem}
-  .audit-row:last-child{border-bottom:none}
-  .audit-row time{color:var(--muted);white-space:nowrap;min-width:9rem}
-  #toggle-security,#toggle-config{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:.3rem .6rem;font-size:.8rem;cursor:pointer;font-family:inherit}
-  .config-row{display:flex;align-items:center;gap:.5rem;margin:.5rem 0}
-  .config-row code{flex:1;overflow-x:auto;white-space:nowrap;padding:.4rem .5rem;background:var(--bg);border:1px solid var(--border);border-radius:6px}
-  .config-row button,#copy-config-curl{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:.35rem .7rem;font-size:.8rem;cursor:pointer;font-family:inherit;white-space:nowrap}
-  .curl-block{white-space:pre-wrap;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:.75rem;font-size:.8rem;margin:.5rem 0;overflow-x:auto}
-  details summary{cursor:pointer}
-</style>
-<div class="wrap">
-  <div class="top-nav">
-    <a href="/">← Retour</a>
-    <div class="right">
-      <button id="notif-toggle" type="button" title="Notifications navigateur sur nouvel échec" aria-label="Activer les notifications">🔔</button>
-      <button id="theme-toggle" type="button" title="Changer de thème" aria-label="Changer de thème">🌓</button>
-      <button id="export-json" type="button">Export JSON</button>
-      <button id="export-csv" type="button">Export CSV</button>
-      <button id="logout" type="button" hidden>Se déconnecter</button>
-    </div>
-  </div>
-
-  <div id="gate" class="center" hidden>
-    <h1>🔒 Accès protégé</h1>
-    <p class="note">Cette page est protégée par mot de passe.</p>
-    <input id="pw" type="password" placeholder="Mot de passe" aria-label="Mot de passe" autocomplete="current-password" />
-    <button id="pw-submit" type="button" class="primary">Accéder</button>
-    <div id="pw-error" class="error-msg"></div>
-  </div>
-
-  <div id="loading" class="center" hidden><p class="note">Chargement…</p></div>
-
-  <div id="app" hidden>
-    <div class="card">
-      <div class="card-head">
-        <h1 id="timeline-title">Activité récente (tous sites)</h1>
-      </div>
-      <div id="timeline" class="timeline-strip"></div>
-    </div>
-    <div class="card">
-      <div class="card-head">
-        <h1>État de santé (dernier déploiement par site)</h1>
-        <span class="refresh-note">Actualisation auto toutes les ${Math.round(REFRESH_MS / 1000)} s (touche <kbd>r</kbd>)</span>
-      </div>
-      <div id="health"></div>
-    </div>
-    <div class="card">
-      <div class="card-head">
-        <h1>Derniers déploiements</h1>
-      </div>
-      <div class="filters">
-        <input id="f-search" type="text" placeholder="Filtrer par repo ou app… (touche /)" aria-label="Filtrer par repo ou app" />
-        <select id="f-status" aria-label="Filtrer par statut">
-          <option value="">Tous les statuts</option>
-          <option value="pending">🟠 En cours</option>
-          <option value="success">🟢 Réussi</option>
-          <option value="failure">🔴 Échoué</option>
-          <option value="error">🔴 Erreur</option>
-        </select>
-        <button id="copy-link" type="button" title="Copier un lien avec ces filtres">🔗 Copier le lien</button>
-      </div>
-      <div id="list"></div>
-      <div class="pager">
-        <span id="pager-count" class="note"></span>
-        <button id="load-more" type="button" hidden>Charger plus</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-head">
-        <h1>Configuration</h1>
-        <button id="toggle-config" type="button">Afficher</button>
-      </div>
-      <div id="config-panel" hidden>
-        <p class="note">Webhook à configurer dans Dokploy pour une nouvelle app (Notifications → Add → Webhook) :</p>
-        <div class="config-row">
-          <code id="config-url">—</code>
-          <button id="copy-config-url" type="button">Copier l'URL</button>
-        </div>
-        <div class="config-row">
-          <code id="config-header">—</code>
-          <button id="copy-config-header" type="button">Copier le header</button>
-        </div>
-        <details>
-          <summary class="note">Exemple curl complet (test manuel)</summary>
-          <pre id="config-curl" class="mono curl-block"></pre>
-          <button id="copy-config-curl" type="button">Copier la commande</button>
-        </details>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-head">
-        <h1>Sécurité</h1>
-        <button id="toggle-security" type="button">Afficher</button>
-      </div>
-      <div id="security-panel" hidden>
-        <h2>Changer le mot de passe</h2>
-        <div class="pw-form">
-          <input id="pw-current" type="password" placeholder="Mot de passe actuel" aria-label="Mot de passe actuel" autocomplete="current-password" />
-          <input id="pw-new" type="password" placeholder="Nouveau mot de passe (8+ caractères)" aria-label="Nouveau mot de passe" autocomplete="new-password" />
-          <button id="pw-change-submit" type="button">Changer</button>
-        </div>
-        <div id="pw-change-msg" class="note"></div>
-
-        <h2>Journal d'audit</h2>
-        <div class="filters">
-          <select id="audit-type" aria-label="Filtrer par type d'événement">
-            <option value="">Tous les types</option>
-            <option value="login_success">✅ Connexion réussie</option>
-            <option value="login_failure">❌ Connexion échouée</option>
-            <option value="retry">🔁 Relance</option>
-            <option value="password_change">🔑 Mot de passe changé</option>
-          </select>
-          <input id="audit-ip" type="text" placeholder="Filtrer par IP…" aria-label="Filtrer par IP" />
-          <input id="audit-since" type="date" title="Depuis cette date" aria-label="Depuis cette date" />
-        </div>
-        <div id="audit-log"></div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<script>
 (function () {
-  var STATUS_META = ${JSON.stringify(STATUS_META)};
-  var STALE_MS = ${STALE_MS};
-  var REFRESH_MS = ${REFRESH_MS};
+  var STATUS_META = window.STATUS_META;
+  var STALE_MS = 30 * 24 * 60 * 60 * 1000;
+  var REFRESH_MS = 8000;
   var $ = function (sel) { return document.querySelector(sel); };
   var show = function (el) { el.hidden = false; };
   var hide = function (el) { el.hidden = true; };
@@ -274,8 +85,8 @@ function renderAdminPage() {
     row.className = "row" + (muted && opts.withHealth ? " muted" : "");
     row.innerHTML =
       '<span class="emoji">' + (muted && opts.withHealth ? "🔧" : meta.emoji) + "</span>" +
-      "<span><span class=\\"name\\">" + repoKey + "</span><br>" +
-      "<span class=\\"sub\\">" + (muted && opts.withHealth ? "Maintenance — " : "") + meta.label + (record.description ? " — " + record.description : "") + " · " + fmtDate(record.updatedAt) + "</span></span>";
+      "<span><span class=\"name\">" + repoKey + "</span><br>" +
+      "<span class=\"sub\">" + (muted && opts.withHealth ? "Maintenance — " : "") + meta.label + (record.description ? " — " + record.description : "") + " · " + fmtDate(record.updatedAt) + "</span></span>";
 
     if (opts.withHealth) {
       var s = stats[repoKey];
@@ -346,7 +157,7 @@ function renderAdminPage() {
   function renderHealth(health) {
     var el = $("#health");
     el.innerHTML = "";
-    if (!health.length) el.innerHTML = '<p class="note">Aucun déploiement suivi pour l\\'instant.</p>';
+    if (!health.length) el.innerHTML = '<p class="note">Aucun déploiement suivi pour l\'instant.</p>';
     health.forEach(function (r) { el.appendChild(rowFor(r, { withHealth: true })); });
   }
 
@@ -354,7 +165,7 @@ function renderAdminPage() {
     $("#timeline-title").textContent = filtered ? "Activité récente (filtrée)" : "Activité récente (tous sites)";
     var el = $("#timeline");
     el.innerHTML = "";
-    if (!deployments.length) { el.innerHTML = '<p class="note">Rien à afficher pour l\\'instant.</p>'; return; }
+    if (!deployments.length) { el.innerHTML = '<p class="note">Rien à afficher pour l\'instant.</p>'; return; }
     deployments.slice(0, 80).forEach(function (r) {
       var meta = STATUS_META[r.status] || { emoji: "⚪", label: r.status, color: "#6b7280" };
       var dot = document.createElement("span");
@@ -456,7 +267,7 @@ function renderAdminPage() {
         return '"' + v.replace(/"/g, '""') + '"';
       }).join(","));
     });
-    download("deployments.csv", lines.join("\\n"), "text/csv");
+    download("deployments.csv", lines.join("\n"), "text/csv");
   });
 
   var FAVICON_NORMAL = $("#favicon").href;
@@ -714,7 +525,3 @@ function renderAdminPage() {
   show($("#loading"));
   load(true);
 })();
-</script>`;
-}
-
-module.exports = { renderAdminPage };

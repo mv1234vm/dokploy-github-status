@@ -1,7 +1,3 @@
-// Lecture/écriture JSON partagée par store.js, audit-log.js et mute.js :
-// mêmes fichiers plats dans DATA_DIR, même tolérance à un fichier absent,
-// même débounce d'écriture (plusieurs changements rapprochés ne déclenchent
-// qu'une seule écriture disque, via setImmediate).
 const fs = require("fs");
 
 function readJson(file, fallback) {
@@ -33,9 +29,6 @@ function makeDebouncedWriter(label, dir, file, getData) {
     scheduled = true;
     setImmediate(writeNow);
   }
-  // Écriture synchrone immédiate : à utiliser sur SIGTERM/SIGINT pour ne pas
-  // perdre le dernier changement resté dans la fenêtre de debounce quand le
-  // conteneur s'arrête (ça nous est déjà arrivé en pratique).
   schedule.flush = writeNow;
   return schedule;
 }

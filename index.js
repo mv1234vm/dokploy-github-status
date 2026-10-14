@@ -9,7 +9,6 @@ const { renderAdminPage } = require("./admin-page");
 const { renderLandingPage } = require("./landing-page");
 
 const app = express();
-// On garde le corps brut pour vérifier la signature des webhooks GitHub
 app.use(
   express.json({
     limit: "1mb",
@@ -19,37 +18,19 @@ app.use(
   })
 );
 app.disable("x-powered-by");
-// Derrière le reverse-proxy Dokploy (Traefik) : sans ça, req.ip vaut toujours
-// l'IP interne du proxy et le throttle anti brute-force partagerait le même
-// compteur pour tout le monde.
 app.set("trust proxy", true);
 
 const PORT = 3000;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
-// Clé API Dokploy : permet de retrouver automatiquement le repo GitHub de chaque app
 const DOKPLOY_API_KEY = process.env.DOKPLOY_API_KEY || "";
-// URL Dokploy (optionnel : sinon déduite du lien contenu dans la notification)
 const DOKPLOY_URL = (process.env.DOKPLOY_URL || "").replace(/\/+$/, "");
-// Fallbacks facultatifs si on n'utilise pas l'API Dokploy
 const GITHUB_OWNER = process.env.GITHUB_OWNER || "";
 const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
-// Optionnel : secret d'un webhook GitHub "push" pour poser le statut "en cours"
 const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || "";
-// Pages /deployments/:id : URL publique de CE service (pour construire les
-// liens qu'on pose sur GitHub) + mot de passe d'accès direct.
 const PUBLIC_URL = (process.env.PUBLIC_URL || "").replace(/\/+$/, "");
-// Mutable : /api/change-password peut la mettre à jour à chaud (voir plus
-// bas). Sans SELF_APPLICATION_ID, le changement ne survit pas à un
-// redéploiement — DASHBOARD_PASSWORD dans l'env Dokploy reste la source de
-// vérité au redémarrage.
 let DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || "";
-// Optionnel : applicationId Dokploy de CE service lui-même. Ne sert qu'à
-// /api/change-password pour réécrire DASHBOARD_PASSWORD dans l'env Dokploy
-// (sinon la rotation reste en mémoire seulement, perdue au redéploiement).
 const SELF_APPLICATION_ID = process.env.SELF_APPLICATION_ID || "";
-// Optionnel : URL appelée en POST à chaque changement de statut (JSON), pour
-// brancher n'importe quel outil tiers sans intégration dédiée.
 const OUTGOING_WEBHOOK_URL = process.env.OUTGOING_WEBHOOK_URL || "";
 let APP_MAP = {};
 try {
@@ -85,10 +66,6 @@ if (PUBLIC_URL && !DASHBOARD_PASSWORD) {
 
 const signer = makeSigner(WEBHOOK_SECRET);
 
-// Construit l'URL de la page de détail d'un déploiement, avec un jeton signé
-// qui n'autorise QUE ce déploiement (voir auth.js) — c'est ce jeton qui
-// permet au clic "Details"/"View deployment" depuis GitHub de s'ouvrir sans
-// écran de mot de passe, sans pour autant donner accès aux autres déploiements.
 function buildDeploymentUrl(deploymentId) {
   if (!PUBLIC_URL) return null;
   const token = signer.sign(`deployment:${deploymentId}`, 60 * 60 * 24 * 90);
@@ -136,7 +113,6 @@ function cleanUrl(value) {
     const u = new URL(String(value));
     if (u.protocol === "http:" || u.protocol === "https:") return u.toString();
   } catch {
-    /* ignore */
   }
   return undefined;
 }
@@ -146,8 +122,6 @@ function withTimeout(ms) {
   const t = setTimeout(() => c.abort(), ms);
   return { signal: c.signal, done: () => clearTimeout(t) };
 }
-
-// GitHub API
 
 function githubHeaders() {
   return {
@@ -182,8 +156,6 @@ async function githubFetchOnce(url, options) {
   return data;
 }
 
-// Réessaie sur erreur réseau/5xx (2 tentatives, backoff court) — jamais sur
-// un 4xx, qui ne changera pas de résultat au second essai.
 async function githubFetch(url, options = {}, attempt = 0) {
   try {
     return await githubFetchOnce(url, options);
@@ -211,36 +183,18 @@ async function getHeadSha(owner, repo, branch) {
   return data.sha;
 }
 
-// GitHub accepte "in_progress" pour un deployment status (pas pour un commit
-// status, qui reste "pending") : plus juste sémantiquement que "pending" tout
-// court pour un déploiement réellement en cours d'exécution.
 function toDeploymentStatusState(state) {
   if (state === "pending") return "in_progress";
-  return state; // success | failure | error
+  return state;
 }
 
-// url = URL publique de l'app (environment_url, "voir le site") ; logUrl =
-// lien de secours vers les logs Dokploy si /deployments/:id n'est pas
-// configuré (PUBLIC_URL absent) ; meta = infos d'affichage optionnelles
-// (appName, environment) pour la page de détail.
 async function setGithubStatus(owner, repo, sha, state, description, url, logUrl, meta = {}) {
-  // Toujours clore un éventuel pending précédent sur ce repo avant d'agir,
-  // qu'on pose un nouveau pending (commit court-circuité par un push plus
-  // récent) ou un statut final — sinon un pending resterait bloqué si le
-  // déploiement suivant saute directement à "success" sans repasser par nous.
   await closeStalePending(owner, repo, sha);
 
   const key = `${owner}/${repo}`;
   const open = pendingByRepo.get(key);
   let deploymentId;
   if (open && open.sha === sha) {
-    // Même sha que le pending encore ouvert sur ce repo : c'est la suite du
-    // MÊME cycle de déploiement (le poller a vu "running" pour ce commit,
-    // on ferme maintenant ce même déploiement en "success"/"failure").
-    // Réutiliser l'id plutôt qu'en créer un nouveau évite d'avoir, pour un
-    // seul déploiement réel, deux objets GitHub Deployment distincts — l'un
-    // resterait "in_progress" pour toujours, l'autre n'aurait pas de vraie
-    // date de début sur /deployments/:id.
     deploymentId = open.deploymentId;
   } else {
     const deployment = await githubPost(
@@ -309,8 +263,6 @@ async function setGithubStatus(owner, repo, sha, state, description, url, logUrl
   });
 }
 
-// Best-effort, ne bloque jamais le traitement principal : une intégration
-// tierce en panne ne doit jamais empêcher de poser le statut GitHub.
 function fireOutgoingWebhook(payload) {
   if (!OUTGOING_WEBHOOK_URL) return;
   const to = withTimeout(5000);
@@ -324,12 +276,7 @@ function fireOutgoingWebhook(payload) {
     .finally(to.done);
 }
 
-// Dokploy ne déploie que le dernier commit poussé sur une branche : si un
-// commit B arrive pendant que le pending de A tourne encore, A est
-// court-circuité et resterait bloqué en pending indéfiniment. On mémorise
-// donc le dernier pending par repo pour le refermer dès qu'un autre sha
-// prend sa place ou que le déploiement se termine.
-const pendingByRepo = new Map(); // "owner/repo" -> { sha, deploymentId }
+const pendingByRepo = new Map();
 
 async function closeStalePending(owner, repo, keepSha) {
   const key = `${owner}/${repo}`;
@@ -346,7 +293,6 @@ async function closeStalePending(owner, repo, keepSha) {
       `[github] pending clos (court-circuité) : ${owner}/${repo} ${stale.sha.slice(0, 7)}`
     );
   } catch (err) {
-    // Le sha a pu disparaître (force-push, branche supprimée) : pas bloquant.
     console.warn(
       `[github] impossible de clore le commit status pending ${stale.sha.slice(0, 7)} : ${err.message}`
     );
@@ -365,8 +311,6 @@ async function closeStalePending(owner, repo, keepSha) {
   pendingByRepo.delete(key);
 }
 
-// Résolution du repo GitHub d'une app Dokploy
-
 function parseGitUrl(gitUrl) {
   if (!gitUrl) return null;
   const m = String(gitUrl).match(
@@ -375,7 +319,6 @@ function parseGitUrl(gitUrl) {
   return m ? { owner: m[1], repo: m[2] } : null;
 }
 
-// URL Dokploy : fournie par env, sinon apprise depuis le lien d'une notification
 let dokployBase = DOKPLOY_URL;
 
 async function dokployGet(path) {
@@ -424,9 +367,6 @@ async function dokployPost(path, body) {
   return res.json().catch(() => ({}));
 }
 
-// Extrait owner/repo/branch (+ nom d'app, URL publique et applicationId
-// Dokploy — ce dernier permet le bouton "Relancer" sur /deployments/:id)
-// d'un objet application Dokploy.
 function repoFromApp(a) {
   if (!a) return null;
   const appName = a.name || a.appName || null;
@@ -441,7 +381,6 @@ function repoFromApp(a) {
   return null;
 }
 
-// Interroge l'API Dokploy pour connaître le repo GitHub d'une application
 async function resolveViaDokploy(buildLink) {
   if (!DOKPLOY_API_KEY) return null;
   let appId;
@@ -479,28 +418,21 @@ function resolveViaConfig(appName) {
   return null;
 }
 
-// Sondage périodique de Dokploy (statut "en cours" + rattrapage)
-
 const POLL_ENABLED = (process.env.POLL || "on").toLowerCase() !== "off";
 const POLL_INTERVAL_MS = Math.max(
   2000,
   Number(process.env.POLL_INTERVAL_MS) || 5000
 );
-// Fenêtre de rattrapage des statuts finaux manqués : ne concerne que les
-// déploiements terminés il y a moins de X minutes (évite la "tempête" au
-// redémarrage du service, où sinon tout l'historique récent de chaque app
-// serait reposté d'un coup — voir pollOnce()).
 const CATCHUP_MAX_AGE_MS = Math.max(
   60000,
   Number(process.env.CATCHUP_MAX_AGE_MS) || 15 * 60 * 1000
 );
-const seenDeployments = new Map(); // applicationId -> dernier deploymentId "en cours" traité
-const seenFinal = new Map(); // applicationId -> dernier deploymentId final (done/error) déjà posté
-const appRepoCache = new Map(); // applicationId -> {owner,repo,branch} | null
-const learnedAppIds = new Set(); // ids vus via les notifications /webhook
+const seenDeployments = new Map();
+const seenFinal = new Map();
+const appRepoCache = new Map();
+const learnedAppIds = new Set();
 let pollerStarted = false;
 
-// Récupère (et met en cache) le repo GitHub d'une application via son id
 async function getAppRepo(applicationId) {
   if (appRepoCache.has(applicationId)) return appRepoCache.get(applicationId);
   try {
@@ -508,10 +440,6 @@ async function getAppRepo(applicationId) {
       `/api/application.one?applicationId=${encodeURIComponent(applicationId)}`
     );
     const repo = repoFromApp(a);
-    // Seule une résolution réussie est mise en cache (y compris un repo=null
-    // légitime, pour une app qui n'est pas liée à un repo git). Un échec
-    // réseau/API transitoire ne doit jamais blacklister l'app à vie : elle
-    // serait sinon ignorée par le poller jusqu'au prochain redémarrage.
     appRepoCache.set(applicationId, repo);
     return repo;
   } catch (err) {
@@ -520,7 +448,6 @@ async function getAppRepo(applicationId) {
   }
 }
 
-// Parcourt récursivement la réponse project.all (project -> environments -> applications)
 function walkAppIds(node, out = new Set()) {
   if (!node || typeof node !== "object") return out;
   if (Array.isArray(node)) {
@@ -537,12 +464,9 @@ function walkAppIds(node, out = new Set()) {
   return out;
 }
 
-// Suivi de panne du poller (ex. clé Dokploy expirée) : jusqu'ici une erreur
-// de project.all ne faisait qu'un warn silencieux, invisible tant qu'on ne
-// lisait pas les logs. Exposé sur /health pour être visible/surveillable.
 let pollFailureStreak = 0;
 let lastPollError = null;
-const POLL_ALERT_THRESHOLD = 5; // ~25s à 5s/tick avant de considérer le poller en panne
+const POLL_ALERT_THRESHOLD = 5;
 
 async function listAppIds() {
   const ids = new Set(learnedAppIds);
@@ -568,9 +492,6 @@ async function listAppIds() {
   return ids;
 }
 
-// Le champ "description" d'un déploiement Dokploy vaut "Commit: <sha>" — bien
-// plus fiable que "dernier commit de la branche" pour un rattrapage a
-// posteriori (la branche a pu avancer depuis ce déploiement précis).
 function shaFromDeployment(deployment) {
   const m = String(deployment?.description || "").match(/[0-9a-f]{7,40}/i);
   return m ? m[0] : null;
@@ -620,13 +541,8 @@ async function pollOnce() {
       continue;
     }
 
-    // Filet de rattrapage : si le webhook Dokploy n'a jamais atteint ce
-    // service pour ce déploiement, on pose le statut final a posteriori.
     if (status === "done" || status === "error") {
       if (seenFinal.get(id) === latest.deploymentId) continue;
-      // Un redémarrage vide la mémoire du service : sans cette fenêtre, tout
-      // l'historique récent de chaque app serait reposté d'un coup. On ne
-      // rattrape que ce qui s'est réellement terminé il y a peu.
       const finishedAt = new Date(
         latest.finishedAt || latest.startedAt || latest.createdAt || 0
       ).getTime();
@@ -634,21 +550,16 @@ async function pollOnce() {
         seenFinal.set(id, latest.deploymentId);
         continue;
       }
-      // Si ce service a vu le déploiement passer par "running", le webhook
-      // Dokploy va normalement poser lui-même le statut final dans la
-      // seconde — on lui laisse cette fenêtre pour éviter un double post.
-      // Passé ce délai, on pose quand même : un webhook qui échoue ne doit
-      // jamais laisser un déploiement bloqué en pending indéfiniment.
       const WEBHOOK_GRACE_MS = 90 * 1000;
       if (
         seenDeployments.get(id) === latest.deploymentId &&
         Date.now() - finishedAt < WEBHOOK_GRACE_MS
       ) {
-        continue; // ne marque pas seenFinal : retenté au prochain tick
+        continue;
       }
       seenFinal.set(id, latest.deploymentId);
       const sha = shaFromDeployment(latest);
-      if (!sha) continue; // rien d'exploitable, pas de commit identifiable
+      if (!sha) continue;
       try {
         const mapped = STATE_MAP[status === "done" ? "success" : "failure"];
         await setGithubStatus(
@@ -681,8 +592,6 @@ function startPoller() {
   setInterval(tick, POLL_INTERVAL_MS).unref();
 }
 
-// Normalisation du payload webhook
-
 function readStatus(body) {
   const raw = String(body.status || body.type || "").toLowerCase();
   const title = String(body.title || "").toLowerCase();
@@ -695,7 +604,6 @@ function readStatus(body) {
 }
 
 async function parsePayload(body = {}) {
-  // Format manuel explicite
   if (body.githubOwner && body.githubRepo) {
     return {
       appName: body.appName,
@@ -710,7 +618,6 @@ async function parsePayload(body = {}) {
     };
   }
 
-  // Format notification Dokploy
   const appName = body.applicationName || body.appName;
   if (!appName) return null;
 
@@ -732,11 +639,7 @@ async function parsePayload(body = {}) {
   };
 }
 
-// Routes
-
-// Rate-limit par IP sur les deux endpoints webhook, en plus du secret déjà
-// requis : un secret valide ne doit pas pouvoir spammer sans limite.
-const webhookAttempts = new Map(); // ip -> { count, resetAt }
+const webhookAttempts = new Map();
 const WEBHOOK_RATE_LIMIT = 60;
 function webhookThrottled(ip) {
   const now = Date.now();
@@ -812,7 +715,6 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// Webhook GitHub "push" : pose le statut "en cours" dès le push (optionnel)
 app.post("/github", async (req, res) => {
   if (webhookThrottled(req.ip || "?")) {
     return res.status(429).json({ error: "Trop de requêtes, réessaie dans une minute." });
@@ -866,12 +768,7 @@ app.post("/github", async (req, res) => {
   }
 });
 
-// Pages de détail des déploiements
-
-// Garde-fou anti brute-force sur le mot de passe : 5 essais/minute par IP.
-// Volontairement simple (mémoire, pas de dépendance) — suffisant pour une
-// page à usage interne, pas un endpoint public à fort trafic.
-const loginAttempts = new Map(); // ip -> { count, resetAt }
+const loginAttempts = new Map();
 function loginThrottled(ip) {
   const now = Date.now();
   const entry = loginAttempts.get(ip);
@@ -896,14 +793,12 @@ app.post("/api/login", (req, res) => {
     return res.status(401).json({ error: "Mot de passe incorrect." });
   }
   auditLog.record("login_success", { ip: req.ip || "?" });
-  const token = signer.sign("session", 60 * 60 * 24 * 30); // 30 jours
+  const token = signer.sign("session", 60 * 60 * 24 * 30);
   res.json({ token });
 });
 
 const DEPLOYMENT_ID_RE = /^[0-9]+$/;
 
-// Un jeton de session (mot de passe) donne accès à tous les déploiements ;
-// un jeton de lien (posé sur GitHub) ne donne accès qu'au déploiement visé.
 function isAuthorizedFor(req, id) {
   const authHeader = req.headers.authorization || "";
   const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
@@ -913,25 +808,17 @@ function isAuthorizedFor(req, id) {
   return false;
 }
 
-// Pour les nouvelles fonctionnalités (liste, santé de tous les sites,
-// relance) : seul le mot de passe (jeton de session) donne accès, jamais un
-// jeton de lien scopé à un seul déploiement.
 function isSessionAuthorized(req) {
   const authHeader = req.headers.authorization || "";
   const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
   return !!(bearer && signer.verify(bearer, "session"));
 }
 
-// Données du déploiement, jamais les secrets (token GitHub, clé Dokploy,
-// mot de passe) : le store ne les contient de toute façon pas.
 app.get("/api/deployments/:id", (req, res) => {
   const { id } = req.params;
   if (!DEPLOYMENT_ID_RE.test(id)) {
     return res.status(400).json({ error: "Identifiant de déploiement invalide" });
   }
-  // Auth vérifiée AVANT de regarder si l'id existe : un visiteur non
-  // authentifié reçoit toujours 401, jamais 404, pour ne pas laisser deviner
-  // quels ids existent par simple essai-erreur.
   if (!isAuthorizedFor(req, id)) {
     return res.status(401).json({ error: "Authentification requise" });
   }
@@ -940,15 +827,10 @@ app.get("/api/deployments/:id", (req, res) => {
   res.json({ ...record, previousSha: store.previousSha(record) });
 });
 
-// Une seule page HTML pour tous les déploiements : le rendu (et
-// l'authentification) se fait côté client via /api/deployments/:id, qui lui
-// applique les vraies vérifications. Servir ce gabarit ne fuite donc rien.
 app.get("/deployments/:id", (_req, res) => {
   res.type("html").send(renderDeploymentPage());
 });
 
-// Liste + état de santé de tous les sites : réservé au mot de passe, jamais
-// accessible via un jeton de lien scopé à un seul déploiement.
 const VALID_STATUSES = new Set(["pending", "success", "failure", "error"]);
 
 app.get("/api/deployments", (req, res) => {
@@ -971,9 +853,7 @@ app.get("/api/deployments", (req, res) => {
   });
 });
 
-// Anti-spam sur le bouton "Relancer" : 1 relance / 30 s par application
-// Dokploy visée, quel que soit l'id de déploiement utilisé pour y accéder.
-const retryAttempts = new Map(); // applicationId -> timestamp du dernier essai
+const retryAttempts = new Map();
 const RETRY_COOLDOWN_MS = 30000;
 function retryThrottled(applicationId) {
   const last = retryAttempts.get(applicationId);
@@ -1023,8 +903,6 @@ app.get("/api/audit-log", (req, res) => {
   res.json({ entries: auditLog.list(limit, { type, ip, since }) });
 });
 
-// Volontairement derrière la session : WEBHOOK_SECRET ne doit jamais
-// apparaître sur une page publique (quelqu'un pourrait forger des webhooks).
 app.get("/api/webhook-config", (req, res) => {
   if (!isSessionAuthorized(req)) {
     return res.status(401).json({ error: "Authentification requise" });
@@ -1072,9 +950,6 @@ app.post("/api/change-password", async (req, res) => {
   }
   try {
     const currentEnv = await dokployGet(`/api/application.one?applicationId=${encodeURIComponent(SELF_APPLICATION_ID)}`);
-    // dokployGet() renvoie null si DOKPLOY_API_KEY/dokployBase ne sont pas
-    // prêts : sans ce garde-fou on écrirait la ligne littérale "undefined"
-    // comme environnement complet, effaçant GITHUB_TOKEN/WEBHOOK_SECRET.
     if (!currentEnv || typeof currentEnv.env !== "string") {
       throw new Error("Impossible de lire l'environnement actuel depuis Dokploy (API indisponible ou URL Dokploy pas encore connue)");
     }
@@ -1088,10 +963,6 @@ app.post("/api/change-password", async (req, res) => {
     });
     res.json({ ok: true });
   } catch (err) {
-    // La mémoire a déjà le nouveau mot de passe (utilisable tout de suite),
-    // mais l'écriture Dokploy a échoué : on revient sur l'ancien pour éviter
-    // un mot de passe qui "marche maintenant mais plus après un redeploy"
-    // sans que l'utilisateur le sache.
     DASHBOARD_PASSWORD = previous;
     console.error("[change-password] échec de la mise à jour Dokploy :", err.message, err.detail || "");
     res.status(502).json({
@@ -1112,8 +983,6 @@ app.post("/api/repos/:owner/:repo/mute", (req, res) => {
   res.json({ ok: true, muted: nowMuted });
 });
 
-// Page HTML de la liste + santé (même principe que /deployments/:id : le
-// rendu et l'authentification se font côté client via /api/deployments).
 app.get("/deployments", (_req, res) => {
   res.type("html").send(renderAdminPage());
 });
@@ -1126,7 +995,6 @@ app.get("/health", (_req, res) =>
   })
 );
 
-// Diagnostic du poller : GET /debug-poll?secret=<WEBHOOK_SECRET>
 app.get("/debug-poll", async (req, res) => {
   if (!safeEqual(req.query.secret || "", WEBHOOK_SECRET)) {
     return res.status(401).json({ error: "Unauthorized" });
@@ -1157,9 +1025,6 @@ app.get("/debug-poll", async (req, res) => {
   res.type("application/json").send(JSON.stringify(out, null, 2));
 });
 
-// Manifest minimal pour permettre "Ajouter à l'écran d'accueil" sur mobile.
-// Pas de service worker : la page reste toujours servie par le réseau (pas
-// de mode hors-ligne), juste une icône + un nom d'app propres une fois épinglée.
 app.get("/manifest.json", (_req, res) => {
   res.json({
     name: "dokploy-github-status",
@@ -1188,13 +1053,9 @@ app.get("/", (_req, res) => {
 
 app.listen(PORT, () => {
   console.log(`dokploy-github-status en écoute sur le port ${PORT}`);
-  startPoller(); // démarre si DOKPLOY_URL est connu ; sinon au 1er webhook reçu
+  startPoller();
 });
 
-// Les écritures sur disque (store, audit-log, mute) sont debounced via
-// setImmediate : sans ce flush, un SIGTERM (arrêt normal du conteneur par
-// Docker à chaque redéploiement) peut couper le process avant la toute
-// dernière écriture et perdre le changement le plus récent.
 function shutdown(signal) {
   console.log(`[server] ${signal} reçu, sauvegarde avant arrêt`);
   store.flush();

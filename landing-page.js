@@ -1,7 +1,3 @@
-// Page d'accueil publique ("/") : aucune donnée sensible, juste une vitrine
-// du service et un point d'entrée vers le tableau de bord. Même charte
-// graphique que deployment-page.js/admin-page.js (variables CSS partagées).
-
 function renderLandingPage() {
   return `<title>dokploy-github-status</title>
 <meta name="theme-color" content="#ea580c">

@@ -43,7 +43,7 @@ test("the debounced writer only touches disk once for several synchronous calls"
     schedule();
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(writeCount, 1);
-    assert.equal(readJson(file, null), "c"); // la dernière valeur l'emporte, pas la première
+    assert.equal(readJson(file, null), "c");
   } finally {
     fs.writeFileSync = realWriteFileSync;
   }
@@ -58,11 +58,10 @@ test("flush() writes synchronously without waiting for the event loop", () => {
 });
 
 test("a write failure (e.g. unwritable directory) is caught, not thrown", () => {
-  // Un fichier comme "dossier" force mkdirSync/writeFileSync à échouer.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dgs-json-file-test-"));
   const blocker = path.join(dir, "blocked");
   fs.writeFileSync(blocker, "x");
-  const file = path.join(blocker, "data.json"); // "blocked" n'est pas un dossier
+  const file = path.join(blocker, "data.json");
   const schedule = makeDebouncedWriter("test", blocker, file, () => ({ a: 1 }));
   assert.doesNotThrow(() => schedule.flush());
 });

@@ -1,9 +1,3 @@
-// Page unique servie pour toute URL /deployments/:id. Le rendu réel est fait
-// côté client : ce fichier ne contient aucune donnée de déploiement, juste le
-// gabarit + la logique d'authentification/affichage. L'id vient de
-// location.pathname, jamais codé en dur ici — impossible de mélanger deux
-// déploiements puisque chaque page ne charge que /api/deployments/<son-id>.
-
 const STATUS_META = {
   pending: { emoji: "🟠", label: "En cours", color: "#ea580c", poll: true },
   success: { emoji: "🟢", label: "Réussi", color: "#16a34a", poll: false },
@@ -237,9 +231,6 @@ function renderDeploymentPage() {
           .then(function (r) {
             retryBtn.disabled = false;
             retryBtn.textContent = r.ok ? "Relance déclenchée ✓" : (r.body.error || "Échec de la relance");
-            // Sans ça, la page reste affichée "Échoué" jusqu'à un rechargement
-            // manuel : le statut ne passera à "pending" qu'au prochain cycle
-            // du poller côté serveur, pas instantanément ici.
             if (r.ok) setTimeout(load, 5000);
           })
           .catch(function () {

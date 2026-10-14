@@ -1,11 +1,3 @@
-// Jetons signés sans état côté serveur (pas de table de sessions à gérer) :
-// - jeton de session (mot de passe correct) : payload fixe "session",
-//   accepté pour n'importe quelle page /deployments/:id.
-// - jeton de lien (posé dans l'URL renvoyée à GitHub) : payload
-//   "deployment:<id>", n'autorise QUE ce déploiement précis. Un lien copié/
-//   partagé ne donne donc jamais accès aux autres déploiements.
-// Les deux sont signés par HMAC-SHA256 avec WEBHOOK_SECRET (déjà un secret
-// exigé au démarrage du service) : inutile d'ajouter une variable d'env.
 const crypto = require("crypto");
 
 function makeSigner(secret) {

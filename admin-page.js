@@ -1,14 +1,7 @@
-// Page /deployments : liste des derniers déploiements + état de santé de
-// tous les sites. Contrairement à /deployments/:id, un jeton de lien GitHub
-// ne donne JAMAIS accès ici — seul le mot de passe (jeton de session) le
-// permet, voir isSessionAuthorized() côté serveur.
-
 const { STATUS_META } = require("./deployment-page");
 
 const REFRESH_MS = 8000;
-// Au-delà de ce délai sans nouveau déploiement pour un repo, le badge passe
-// en orange (site probablement oublié) — purement indicatif, pas une alerte.
-const STALE_MS = 30 * 24 * 60 * 60 * 1000; // 30 jours
+const STALE_MS = 30 * 24 * 60 * 60 * 1000;
 
 function renderAdminPage() {
   return `<title>Tous les sites</title>
@@ -358,9 +351,6 @@ function renderAdminPage() {
   }
 
   function renderTimeline(deployments, filtered) {
-    // Cette frise est construite à partir de la même page (filtrée/paginée)
-    // que la liste en dessous : si un filtre est actif, le titre doit le
-    // dire clairement plutôt que prétendre "tous sites" à tort.
     $("#timeline-title").textContent = filtered ? "Activité récente (filtrée)" : "Activité récente (tous sites)";
     var el = $("#timeline");
     el.innerHTML = "";
@@ -374,12 +364,6 @@ function renderAdminPage() {
     });
   }
 
-  // reset=true : nouveau filtre/premier chargement, on repart de zéro.
-  // reset=false : "Charger plus", on ajoute à la suite de ce qui est affiché.
-  // requestToken évite une course : si "Charger plus" et l'actualisation
-  // auto (8s) partent presque en même temps, seule la réponse à la DERNIÈRE
-  // requête lancée doit mettre à jour l'affichage, sinon une réponse arrivée
-  // en retard peut écraser un état plus récent (doublons, pagination cassée).
   var requestToken = 0;
   function load(reset) {
     if (reset) currentOffset = 0;
@@ -475,13 +459,10 @@ function renderAdminPage() {
     download("deployments.csv", lines.join("\\n"), "text/csv");
   });
 
-  // Alerte "nouvel échec" pendant que l'onglet est ouvert en fond : favicon
-  // rouge + notification navigateur si autorisée. Volontairement local au
-  // navigateur — pas de notification externe (Slack/Discord/email).
   var FAVICON_NORMAL = $("#favicon").href;
   var FAVICON_ALERT =
     "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='45' fill='%23dc2626'/%3E%3C/svg%3E";
-  var previousHealthStatus = null; // repoKey -> status, pour détecter les transitions
+  var previousHealthStatus = null;
   var hasFirstLoad = false;
 
   function setFaviconAlert(on) {
@@ -528,10 +509,6 @@ function renderAdminPage() {
     hasFirstLoad = true;
 
     if (newFailures.length) {
-      // Si l'onglet est déjà au premier plan, l'échec est visible directement
-      // dans le tableau de bord : inutile d'allumer le favicon, qui ne serait
-      // de toute façon jamais éteint puisque "visibilitychange" ne se
-      // déclenche qu'en repassant par l'état caché.
       if (document.hidden) setFaviconAlert(true);
       if (notificationsEnabled() && "Notification" in window && Notification.permission === "granted") {
         newFailures.forEach(function (r) {
@@ -625,9 +602,6 @@ function renderAdminPage() {
         (e.repo ? " — " + e.owner + "/" + e.repo : "") +
         (e.ip ? " (" + e.ip + ")" : "");
       var span = document.createElement("span");
-      // textContent (pas innerHTML) : e.ip vient de req.ip, qui peut refléter
-      // un en-tête X-Forwarded-For fourni par l'appelant (trust proxy actif)
-      // — ne jamais l'interpréter comme du HTML.
       span.textContent = label;
       row.appendChild(time);
       row.appendChild(span);
@@ -724,8 +698,6 @@ function renderAdminPage() {
       });
   });
 
-  // Raccourcis clavier : "/" focus la recherche, "r" force une actualisation.
-  // Ignorés si on tape déjà dans un champ.
   document.addEventListener("keydown", function (e) {
     var tag = (e.target && e.target.tagName || "").toLowerCase();
     if (tag === "input" || tag === "select" || tag === "textarea") return;

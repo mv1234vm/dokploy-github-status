@@ -4,9 +4,6 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-// store.js lit DATA_DIR une seule fois au chargement du module (singleton) :
-// on pointe vers un dossier temporaire dédié AVANT le require, pour ne
-// jamais toucher aux vraies données ni à data/ du dépôt.
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dgs-store-test-"));
 process.env.DATA_DIR = tmpDir;
 const store = require("../store");

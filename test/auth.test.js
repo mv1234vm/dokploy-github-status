@@ -17,7 +17,7 @@ test("verify fails for a different payload (link token not reusable for another 
 
 test("verify fails once the token has expired", () => {
   const signer = makeSigner("test-secret-0123456789");
-  const token = signer.sign("session", -1); // déjà expiré
+  const token = signer.sign("session", -1);
   assert.equal(signer.verify(token, "session"), false);
 });
 

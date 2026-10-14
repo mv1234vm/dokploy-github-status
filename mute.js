@@ -1,7 +1,3 @@
-// Mode "maintenance" par repo : un site marqué ici n'affiche plus ses
-// échecs comme une alerte sur la page santé (badge neutre à la place),
-// utile pendant un chantier volontaire pour éviter le bruit visuel. Ne
-// touche à rien côté GitHub/Dokploy — purement cosmétique côté /deployments.
 const path = require("path");
 const { readJson, makeDebouncedWriter } = require("./json-file");
 
